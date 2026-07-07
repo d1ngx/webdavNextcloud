@@ -1,0 +1,70 @@
+{
+	"id":"webdavNextcloud",
+	"name":"{{LNG['webdavNextcloud.meta.name']}}",
+	"title":"{{LNG['webdavNextcloud.meta.title']}}",
+	"version":"1.0.0",
+	"source":{
+		"className":" font-icon ri-cloud-line bg-blue-6",
+		"icon":""
+	},
+	"category":"file",
+	"description":"{{LNG['webdavNextcloud.meta.desc']}}",
+	"keywords":"nextcloud,desktop,sync,webdav",
+	"auther":{
+		"copyright":"kodcloud.",
+		"homePage":"http://www.kodcloud.com",
+	},
+	"configItem":{
+		"formStyle":{
+			"tabs":{
+				"{{LNG['webdavNextcloud.config.tab1']}}":"pluginAuthOpen,isOpen,pluginAuth,pathAllow,sep001,nextcloudCompatLog,detail",
+			}
+		},
+		"pluginAuthOpen":{
+			"type":"switch",
+			"value":1,
+			"className":"hidden"
+		},
+		"isOpen":{
+			"type":"switch",
+			"value":1,
+			"display":"{{LNG['webdavNextcloud.config.isOpen']}}",
+			"desc":"{{LNG['webdavNextcloud.config.isOpenDesc']}}",
+			"switchItem":{"1":"pluginAuth,pathAllow,nextcloudCompatLog"}
+		},
+		"pluginAuth":{
+			"type":"userSelect",
+			"value":{"all":1},
+			"display":"{{LNG['admin.plugin.auth']}}",
+			"desc":"{{LNG['admin.plugin.authDesc']}}",
+			"require":1
+		},
+		"pathAllow":{
+			"type":"segment",
+			"value":"all",
+			"className":"style-simple",
+			"display":"{{LNG['webdavNextcloud.config.pathAllow']}}",
+			"info":{
+				"all":"<i class='ri-node-tree font-icon'></i>{{LNG['webdavNextcloud.config.pathAllowAll']}}",
+				"self":"<i class='ri-account-circle-fill font-icon'></i>{{LNG['webdavNextcloud.config.pathAllowSelf']}}"
+			},
+			"desc":"{{LNG['webdavNextcloud.config.pathAllowDesc']}}",
+		},
+		"sep001":"<hr/>",
+		"nextcloudCompatLog":{
+			"type":"switch",
+			"value":"0",
+			"display":"{{LNG['webdavNextcloud.config.logTitle']}}",
+			"desc":"{{LNG['webdavNextcloud.config.logDesc']}}:./data/temp/log/webdavNextcloud/"
+		},
+		"detail":{
+			"display":"",
+			"value":"<div class='info-alert info-alert-blue p-10 align-left can-select can-right-menu mb-10'>
+			<div class='mb-15'><b>{{LNG['common.tips']}}:</b></div>
+			<li>{{LNG['webdavNextcloud.tips.route']}}</li>
+			<li>{{LNG['webdavNextcloud.tips.nginx']}}</li>
+			<li>{{LNG['webdavNextcloud.tips.auth']}}</li>
+			</div>"
+		}
+	}
+}
