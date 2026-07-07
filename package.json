@@ -17,20 +17,13 @@
 	"configItem":{
 		"formStyle":{
 			"tabs":{
-				"{{LNG['webdavNextcloud.config.tab1']}}":"pluginAuthOpen,isOpen,pluginAuth,pathAllow,sep001,nextcloudCompatLog,detail",
+				"{{LNG['webdavNextcloud.config.tab1']}}":"pluginAuthOpen,pluginAuth,pathAllow,sep001,nextcloudCompatLog,detail",
 			}
 		},
 		"pluginAuthOpen":{
 			"type":"switch",
 			"value":1,
 			"className":"hidden"
-		},
-		"isOpen":{
-			"type":"switch",
-			"value":1,
-			"display":"{{LNG['webdavNextcloud.config.isOpen']}}",
-			"desc":"{{LNG['webdavNextcloud.config.isOpenDesc']}}",
-			"switchItem":{"1":"pluginAuth,pathAllow,nextcloudCompatLog"}
 		},
 		"pluginAuth":{
 			"type":"userSelect",

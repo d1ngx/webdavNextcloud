@@ -106,6 +106,7 @@ class webdavNextcloudPlugin extends PluginBase{
 		}
 		if(preg_match('#^/remote\.php/dav/files/([^/]*)(/.*)?$#',$uri,$match)){
 			if(!$match[1]){HttpAuth::error();}
+			if(!$this->nextcloudAuthUser($match[1])) return true;
 			if($this->nextcloudLegacyChunkRoute($match[1],isset($match[2]) ? $match[2] : '/')) return true;
 			if($_SERVER['REQUEST_METHOD'] == 'PUT'){
 				if(!defined('KOD_NEXTCLOUD_COMPAT')) define('KOD_NEXTCLOUD_COMPAT',1);
@@ -173,6 +174,10 @@ class webdavNextcloudPlugin extends PluginBase{
 	}
 	private function nextcloudDavTargetPath($dav,$path){
 		$destRel = '/'.trim(rawurldecode($path),'/');
+		if($this->nextcloudCompatRootWriteRelBlocked($destRel)){
+			$this->log('nextcloud target path root write blocked: destRel='.$destRel);
+			return '';
+		}
 		$targetName = get_path_this($destRel);
 		$parentRel = get_path_father($destRel);
 		$parentPath = $dav->parsePath($parentRel ? $parentRel : '/');
@@ -183,12 +188,16 @@ class webdavNextcloudPlugin extends PluginBase{
 		return rtrim($parentPath,'/').'/'.$targetName;
 	}
 	private function nextcloudFilePutRouteInner($user,$path){
-		$authUser = $this->nextcloudAuthUser();
+		$authUser = $this->nextcloudAuthUser($user);
 		if(!$authUser) return true;
 		require_once($this->pluginPath.'php/webdavServer.class.php');
 		require_once($this->pluginPath.'php/webdavServerKod.class.php');
 		$dav = new webdavServerKod('/remote.php/dav/files/'.$user.'/');
 		$destRel = '/'.trim(rawurldecode($path),'/');
+		if($this->nextcloudCompatRootWriteRelBlocked($destRel)){
+			$this->log('nextcloud file put root write blocked: user='.$user.';destRel='.$destRel);
+			return $this->nextcloudRawResponse(403,array('Content-Length: 0','X-DAV-ERROR: nextcloud-root-is-readonly'));
+		}
 		$targetName = get_path_this($destRel);
 		$parentRel = get_path_father($destRel);
 		$parentPath = $dav->parsePath($parentRel ? $parentRel : '/');
@@ -290,12 +299,17 @@ class webdavNextcloudPlugin extends PluginBase{
 		if($pos !== false) return substr($uri,$pos);
 		return $uri;
 	}
+	private function nextcloudCompatRootWriteRelBlocked($destRel){
+		$items = explode('/',trim($destRel,'/'));
+		if(!trim($destRel,'/')) return true;
+		return count($items) <= 1;
+	}
 	private function nextcloudLegacyChunkRoute($user,$path){
 		$method = $_SERVER['REQUEST_METHOD'];
 		if($method != 'PUT' && $method != 'DELETE') return false;
 		$chunk = $this->nextcloudLegacyChunkInfo($path);
 		if(!$chunk) return false;
-		$authUser = $this->nextcloudAuthUser();
+		$authUser = $this->nextcloudAuthUser($user);
 		if(!$authUser) return true;
 		$dir = $this->nextcloudLegacyChunkDir($user,$chunk['transferID']);
 		if($method == 'DELETE'){
@@ -389,7 +403,7 @@ class webdavNextcloudPlugin extends PluginBase{
 		return $this->nextcloudRawResponse(201,array('ETag: "'.$etag.'"','OC-ETag: "'.$etag.'"','Content-Length: 0'));
 	}
 	private function nextcloudChunkRoute($user,$path){
-		$authUser = $this->nextcloudAuthUser();
+		$authUser = $this->nextcloudAuthUser($user);
 		if(!$authUser) return true;
 		$path = trim($path,'/');
 		$parts = $path === '' ? array() : explode('/',$path);
@@ -505,6 +519,10 @@ class webdavNextcloudPlugin extends PluginBase{
 		require_once($this->pluginPath.'php/webdavServerKod.class.php');
 		$dav = new webdavServerKod('/remote.php/dav/files/'.$user.'/');
 		$destRel = '/'.trim($destRel,'/');
+		if($this->nextcloudCompatRootWriteRelBlocked($destRel)){
+			$this->log('nextcloud merged upload root write blocked: user='.$user.';destRel='.$destRel);
+			return false;
+		}
 		$targetName = get_path_this($destRel);
 		$parentRel = get_path_father($destRel);
 		$parentPath = $dav->parsePath($parentRel ? $parentRel : '/');
@@ -1111,16 +1129,32 @@ class webdavNextcloudPlugin extends PluginBase{
 		return $base.'/'.ltrim($path,'/');
 	}
 	private function nextcloudBaseUrl(){
+		$appParts = parse_url(APP_HOST);
 		$scheme = '';
 		if(!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])){
 			$proto = explode(',',$_SERVER['HTTP_X_FORWARDED_PROTO']);
 			$scheme = trim($proto[0]);
 		}
-		if(!$scheme && !empty($_SERVER['REQUEST_SCHEME'])){
-			$scheme = $_SERVER['REQUEST_SCHEME'];
+		if(!$scheme && !empty($_SERVER['HTTP_X_FORWARDED_SSL']) && strtolower($_SERVER['HTTP_X_FORWARDED_SSL']) == 'on'){
+			$scheme = 'https';
+		}
+		if(!$scheme && !empty($_SERVER['HTTP_FRONT_END_HTTPS']) && strtolower($_SERVER['HTTP_FRONT_END_HTTPS']) != 'off'){
+			$scheme = 'https';
 		}
 		if(!$scheme){
 			$scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] != 'off') ? 'https':'http';
+		}
+		if($scheme == 'http' && !empty($_SERVER['REQUEST_SCHEME']) && $_SERVER['REQUEST_SCHEME'] == 'https'){
+			$scheme = 'https';
+		}
+		if($scheme == 'http' && !empty($_SERVER['HTTP_X_FORWARDED_PORT']) && intval($_SERVER['HTTP_X_FORWARDED_PORT']) == 443){
+			$scheme = 'https';
+		}
+		if($scheme == 'http' && !empty($_SERVER['SERVER_PORT']) && intval($_SERVER['SERVER_PORT']) == 443){
+			$scheme = 'https';
+		}
+		if($scheme == 'http' && isset($appParts['scheme']) && $appParts['scheme'] == 'https'){
+			$scheme = 'https';
 		}
 		$host = '';
 		if(!empty($_SERVER['HTTP_X_FORWARDED_HOST'])){
@@ -1131,10 +1165,9 @@ class webdavNextcloudPlugin extends PluginBase{
 			$host = $_SERVER['HTTP_HOST'];
 		}
 		if(!$host){
-			$parts = parse_url(APP_HOST);
-			$host = isset($parts['host']) ? $parts['host'] : '';
-			if($host && isset($parts['port'])) $host .= ':'.$parts['port'];
-			if(isset($parts['scheme'])) $scheme = $parts['scheme'];
+			$host = isset($appParts['host']) ? $appParts['host'] : '';
+			if($host && isset($appParts['port'])) $host .= ':'.$appParts['port'];
+			if(isset($appParts['scheme'])) $scheme = $appParts['scheme'];
 		}
 		$path = parse_url(APP_HOST,PHP_URL_PATH);
 		$path = $path ? rtrim($path,'/') : '';
@@ -1226,8 +1259,17 @@ class webdavNextcloudPlugin extends PluginBase{
 		$this->nextcloudAuthUser();
 		$this->nextcloudOcsResponse(array());return true;
 	}
-	private function nextcloudAuthUser(){
+	private function nextcloudAuthUser($expectUser=false){
 		$user = HttpAuth::get();
+		if(substr($user['user'],0,2) == '$$'){
+			$user['user'] = rawurldecode(substr($user['user'],2));
+		}
+		$startPose = strrpos($user['user'],"\\");
+		if($startPose){$user['user'] = substr($user['user'],$startPose + 1);}
+		if($expectUser !== false && rawurldecode($expectUser) !== $user['user']){
+			$this->log('nextcloud auth user mismatch: pathUser='.rawurldecode($expectUser).';authUser='.$user['user']);
+			HttpAuth::error();return false;
+		}
 		$find = ActionCall('user.index.userInfo', $user['user'],$user['pass']);
 		if(!is_array($find) || !isset($find['userID'])){
 			HttpAuth::error();return false;
@@ -1315,9 +1357,6 @@ class webdavNextcloudPlugin extends PluginBase{
 		if(function_exists('_kodDe') && (!$nowSize || !$enSize || $nowSize != $enSize)){exit;}
 	}
 
-	private function isOpen(){
-		return _get($this->getConfig(),'isOpen') == '1';
-	}
 	private function debug(){
 		// $this->log('start;'.$this->dav->pathGet().';'.$this->dav->path);
 		// 兼容处理chrome插件访问webdav;

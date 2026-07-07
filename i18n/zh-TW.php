@@ -4,8 +4,6 @@ return array(
     "webdavNextcloud.meta.title"      => "Nextcloud Desktop 相容同步服務",
     "webdavNextcloud.meta.desc"       => "為 Nextcloud Desktop 提供 Kodbox 檔案同步所需的登入、OCS 與 WebDAV 相容介面",
     "webdavNextcloud.config.tab1"     => "同步服務",
-    "webdavNextcloud.config.isOpen"   => "開啟Nextcloud相容同步",
-    "webdavNextcloud.config.isOpenDesc" => "開啟後將優先接管 /status.php、/ocs、/remote.php/dav 等 Nextcloud Desktop 同步入口",
     "webdavNextcloud.config.pathAllow" => "同步根目錄範圍",
     "webdavNextcloud.config.pathAllowDesc" => "Nextcloud客戶端登入後可見的根路徑範圍",
     "webdavNextcloud.config.pathAllowAll" => "全部空間",

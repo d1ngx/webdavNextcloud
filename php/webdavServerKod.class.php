@@ -159,10 +159,14 @@ class webdavServerKod extends webdavServer {
 			'fileList' => array(),
 		);
 		$exists = array();
-		$homeName = LNG('explorer.toolbar.rootPath');
-		$list['folderList'][] = $this->nextcloudCompatRootItem(MY_HOME,$homeName);
-		$exists[MY_HOME] = true;
-		$exists[$homeName] = true;
+		$blockFiles = $this->nextcloudBlockFileRoots();
+		foreach($blockFiles as $item){
+			if(!$item || !$item['path'] || !$item['name']) continue;
+			if(isset($exists[$item['path']]) || isset($exists[$item['name']])) continue;
+			$exists[$item['path']] = true;
+			$exists[$item['name']] = true;
+			$list['folderList'][] = $this->nextcloudCompatRootItem($item['path'],$item['name'],$item);
+		}
 		foreach($this->nextcloudEnterpriseRoots() as $item){
 			if(!$item || !$item['path'] || !$item['name']) continue;
 			if(isset($exists[$item['path']]) || isset($exists[$item['name']])) continue;
@@ -172,6 +176,22 @@ class webdavServerKod extends webdavServer {
 		}
 		$list['current']['children'] = array('fileNum'=>0,'folderNum'=>count($list['folderList']));
 		$list['current']['metaInfo']['webdavEtag'] = 'root-'.$this->nextcloudCompatRootsSignature($list['folderList']);
+		return $list;
+	}
+	private function nextcloudBlockFileRoots(){
+		$list = array();
+		$blockFiles = Action('explorer.listBlock')->blockChildren('files');
+		if(!is_array($blockFiles)) return $list;
+		foreach($blockFiles as $item){
+			if(!is_array($item) || !$item['path']) continue;
+			$isFav = trim($item['path'],'/') == trim(KodIO::KOD_USER_FAV,'/');
+			$isHome = _get($item,'sourceRoot') == 'userSelf';
+			$isEnterprise = _get($item,'sourceRoot') == 'groupPublic' ||
+				trim($item['path'],'/') == trim(KodIO::KOD_GROUP_ROOT_SELF,'/');
+			if(!$isFav && !$isHome && !$isEnterprise) continue;
+			if(!$this->nextcloudCompatRootReadable($item['path'])) continue;
+			$list[] = $item;
+		}
 		return $list;
 	}
 	private function nextcloudCompatRootItem($path,$name,$item=false){
@@ -218,23 +238,21 @@ class webdavServerKod extends webdavServer {
 	}
 	private function nextcloudEnterpriseRoots(){
 		$list = array();
-		$blockFiles = Action('explorer.listBlock')->blockChildren('files');
-		if(is_array($blockFiles)){
-			foreach($blockFiles as $item){
-				if(!is_array($item) || !$item['path']) continue;
-				$isGroupRoot = _get($item,'sourceRoot') == 'groupPublic';
-				$isMyGroup = trim($item['path'],'/') == trim(KodIO::KOD_GROUP_ROOT_SELF,'/');
-				if(!$isGroupRoot && !$isMyGroup) continue;
-				$list[] = $item;
-			}
+		if(!$this->nextcloudCompatRootTypeEnabled('myGroup') && !$this->nextcloudCompatRootTypeEnabled('rootGroup')){
+			return $list;
 		}
-		$list[] = array("path"=> KodIO::KOD_GROUP_ROOT_SELF,'name'=>LNG('explorer.toolbar.myGroup'));
+		if($this->nextcloudCompatRootTypeEnabled('myGroup') && $this->nextcloudCompatRootReadable(KodIO::KOD_GROUP_ROOT_SELF)){
+			$list[] = array("path"=> KodIO::KOD_GROUP_ROOT_SELF,'name'=>LNG('explorer.toolbar.myGroup'));
+		}
 		$groupArray = Action('filter.userGroup')->userGroupRoot();
 	    if(is_array($groupArray)){
 			foreach($groupArray as $groupID){
 				$groupInfo = Model('Group')->getInfo($groupID);
 				if($groupInfo && $groupInfo['sourceInfo']){
-					$list[] = array("path"=> KodIO::make($groupInfo['sourceInfo']['sourceID']),'name'=>$groupInfo['name']);
+					$path = KodIO::make($groupInfo['sourceInfo']['sourceID']);
+					if($this->nextcloudCompatRootReadable($path)){
+						$list[] = array("path"=> $path,'name'=>$groupInfo['name']);
+					}
 				}
 			}
 		}
@@ -244,12 +262,41 @@ class webdavServerKod extends webdavServer {
 				foreach($groups as $groupInfo){
 					$groupInfo = Model('Group')->getInfo($groupInfo['groupID']);
 					if($groupInfo && $groupInfo['sourceInfo']){
-						$list[] = array("path"=> KodIO::make($groupInfo['sourceInfo']['sourceID']),'name'=>$groupInfo['name']);
+						$path = KodIO::make($groupInfo['sourceInfo']['sourceID']);
+						if($this->nextcloudCompatRootReadable($path)){
+							$list[] = array("path"=> $path,'name'=>$groupInfo['name']);
+						}
 					}
 				}
 			}
 		}
 		return $list;
+	}
+	private function nextcloudCompatRootTypeEnabled($type){
+		$listBlock = Action('explorer.listBlock');
+		if(is_callable(array($listBlock,'pathEnable'))){
+			return !!$listBlock->pathEnable($type);
+		}
+		return true;
+	}
+	private function nextcloudCompatRootReadable($path){
+		if(!$path) return false;
+		if(IO::infoFull($path)) return true;
+		return !!Action('explorer.auth')->pathOnlyShow($path);
+	}
+	private function nextcloudCompatRootWriteBlocked($dest = false){
+		if(!defined('KOD_NEXTCLOUD_COMPAT') || !KOD_NEXTCLOUD_COMPAT) return false;
+		$path = $this->pathGet($dest);
+		if($path === false) return true;
+		$items = explode('/',trim($path,'/'));
+		if(!trim($path,'/')) return true;
+		return count($items) <= 1;
+	}
+	private function nextcloudCompatRootWriteError(){
+		return array(
+			'code' => 403,
+			'headers' => array('Content-Length: 0','X-DAV-ERROR: nextcloud-root-is-readonly'),
+		);
 	}
 
 	//获取{block:files}/下面的子文件夹;(从pathList直接获取较耗时(70ms),性能优化)  
@@ -499,6 +546,34 @@ class webdavServerKod extends webdavServer {
 		$path = $this->pathCreateParent($pathBefore);
 		if(!$path || !$this->can($path,'edit')) return false;
 		return IO::mkdir($path);
+	}
+	public function httpPUT() {
+		if($this->nextcloudCompatRootWriteBlocked()) return $this->nextcloudCompatRootWriteError();
+		return parent::httpPUT();
+	}
+	public function httpMKCOL() {
+		if($this->nextcloudCompatRootWriteBlocked()) return $this->nextcloudCompatRootWriteError();
+		return parent::httpMKCOL();
+	}
+	public function httpMOVE() {
+		if($this->nextcloudCompatRootWriteBlocked() || $this->nextcloudCompatRootWriteBlocked(true)){
+			return $this->nextcloudCompatRootWriteError();
+		}
+		return parent::httpMOVE();
+	}
+	public function httpCOPY() {
+		if($this->nextcloudCompatRootWriteBlocked() || $this->nextcloudCompatRootWriteBlocked(true)){
+			return $this->nextcloudCompatRootWriteError();
+		}
+		return parent::httpCOPY();
+	}
+	public function httpDELETE() {
+		if($this->nextcloudCompatRootWriteBlocked()) return $this->nextcloudCompatRootWriteError();
+		return parent::httpDELETE();
+	}
+	public function httpLOCK() {
+		if($this->nextcloudCompatRootWriteBlocked()) return $this->nextcloudCompatRootWriteError();
+		return parent::httpLOCK();
 	}
 	public function pathOut($path){
 		if(!$this->pathExists($path) || !$this->can($path,'view')){

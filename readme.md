@@ -1,6 +1,12 @@
 # Kodbox Nextcloud Desktop 兼容同步插件
 
-这是独立于旧版 WebDAV 插件的新插件，只处理 Nextcloud Desktop 同步客户端需要的兼容入口：
+独立于旧 WebDAV 插件，只处理 Nextcloud Desktop 同步入口。旧 WebDAV 可继续负责普通 WebDAV 挂载；本插件启用后，旧 WebDAV 会让出 Nextcloud 相关路由。
+
+## 1. 启用插件
+
+启用插件 `webdavNextcloud`。客户端使用 Kodbox 账号密码登录，权限与 Web 端一致。
+
+兼容入口：
 
 - `/status.php`
 - `/ocs/v1.php/...`
@@ -8,11 +14,25 @@
 - `/remote.php/dav/files/<user>/...`
 - `/remote.php/dav/uploads/<user>/...`
 
-旧版 WebDAV 插件仍可继续负责普通 WebDAV 挂载、网络驱动器和第三方 WebDAV 存储挂载。本插件启用后，旧版 WebDAV 插件会对上述 Nextcloud 兼容入口让路，由本插件优先处理。
+## 2. 导入 SQL
 
-## Nginx 推荐配置
+执行：
 
-将以下 location 放在通用 `location ~ [^/]\.php(/|$)` 之前。大文件直传加速只应放在 `/remote.php/dav/files/`，不要放到通用 PHP location。
+```sql
+plugins/webdavNextcloud/sql/nextcloud_compat.mysql.sql
+```
+
+作用：
+
+- 复用 `io_source_meta`，不新增业务表；
+- 确保 `io_source_meta.key`、`sourceID_key` 索引存在；
+- 初始化 `webdavEtag` 元数据，提升 Nextcloud 客户端增量扫描稳定性。
+
+脚本已做索引存在性判断，可重复执行。
+
+## 3. 配置 Nginx
+
+以下 location 放在通用 PHP location 之前。`fastcgi_pass_request_body off` 只能用于 `/remote.php/dav/files/`，不要放到全局 PHP location。
 
 ```nginx
 location ^~ /remote.php/dav/files/ {
@@ -66,44 +86,49 @@ location ^~ /remote.php/ {
 }
 ```
 
-通用 PHP location 中不要配置以下几项，否则普通 POST 表单和 API 会拿不到请求体：
+HTTPS 或反向代理站点，以上 location 内建议额外传入：
 
 ```nginx
-client_body_in_file_only clean;
-fastcgi_param KOD_NGINX_BODY_FILE $request_body_file;
-fastcgi_param KOD_NGINX_BODY_SIZE $content_length;
-fastcgi_pass_request_body off;
-fastcgi_param CONTENT_LENGTH "";
+fastcgi_param HTTPS on;
+fastcgi_param REQUEST_SCHEME https;
+fastcgi_param HTTP_X_FORWARDED_PROTO https;
+fastcgi_param HTTP_X_FORWARDED_HOST $host;
 ```
 
-修改后执行：
+检查并重载：
 
 ```bash
 nginx -t
 nginx -s reload
 ```
 
-## 日志判断
+同时重启 PHP-FPM 或清理 Opcache。
 
-插件设置里打开“Nextcloud兼容诊断日志”后，正常的大文件上传日志应类似：
+## 4. 验证
 
-```text
-[NEXTCLOUD-COMPAT] nextcloud file put using nginx body file: file=/var/lib/nginx/tmp/client_body/0000000014;size=973770666;expect=973770666
-[NEXTCLOUD-COMPAT] nextcloud file put timing: path={source:110}/;size=973770666;tmpDir=/var/lib/nginx/tmp/client_body/;bodyFile=1;recv=0s;import=3.237s;total=3.245s
-```
+`/status.php` 必须返回 JSON，而不是 Kodbox 首页 HTML。
 
-`bodyFile=1`、`recv=0s` 表示 PHP 直接使用 Nginx 已缓存好的请求体文件。若出现 `bodyFile=0`，说明 Nginx 没有把 `KOD_NGINX_BODY_FILE` 传给 PHP，上传完成后的 100% 等待会明显变长。
-
-## 登录失败排查
-
-Nextcloud Desktop 连接服务端时，第一步会请求 `/status.php`。正常响应是 JSON，体积通常很小；如果 Nginx 日志里看到：
+大文件上传启用诊断日志后，正常应看到：
 
 ```text
-GET /status.php HTTP/1.1" 200 2443
+[NEXTCLOUD-COMPAT] nextcloud file put timing: ...;bodyFile=1;recv=0s;import=3.237s;total=3.245s
 ```
 
-通常表示返回的是 Kodbox 首页 HTML，而不是 Nextcloud status JSON。这说明插件路由没有接管请求，需要确认：
+含义：
 
-- `webdavNextcloud` 插件已启用；
-- Nginx 的 `/status.php` 已转发到 Kodbox `index.php`，或根目录 `status.php` 内容为 `include(dirname(__FILE__).'/index.php');`；
-- 修改插件后已重启 PHP-FPM 或清理 Opcache。
+- `bodyFile=1`：PHP 直接使用 Nginx 已缓存的请求体文件；
+- `recv=0s`：没有再从 `php://input` 慢读；
+- `bodyFile=0`：Nginx 未传入 `KOD_NGINX_BODY_FILE`，上传 100% 后会明显等待。
+
+## 5. 常见问题
+
+`GET /status.php` 返回 `200 2443`：
+
+- 返回的是 Kodbox 首页 HTML；
+- 插件未启用、PHP 未重启、Opcache 未清理，或 Nginx 未转发到 `index.php`。
+
+HTTPS 登录异常：
+
+- 客户端访问 `https://`，但插件生成 `http://` 登录、轮询或 server URL；
+- 常见原因是 Nginx/FastCGI 没传 `HTTPS on`、`REQUEST_SCHEME https`、`HTTP_X_FORWARDED_PROTO https`；
+- 也要确认 Kodbox `APP_HOST` 配置为真实外部 HTTPS 地址。

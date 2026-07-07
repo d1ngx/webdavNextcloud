@@ -4,8 +4,6 @@ return array(
 	'webdavNextcloud.meta.title'		=> "Nextcloud Desktop compatible sync service",
 	'webdavNextcloud.meta.desc'		=> "Provides the login, OCS, and WebDAV compatibility endpoints required for syncing Kodbox files with Nextcloud Desktop",
 	'webdavNextcloud.config.tab1'	=> "Sync Service",
-	'webdavNextcloud.config.isOpen'	=> "Enable Nextcloud-compatible sync",
-	'webdavNextcloud.config.isOpenDesc'	=> "When enabled, this plugin takes priority for /status.php, /ocs, /remote.php/dav, and other Nextcloud Desktop sync endpoints",
 	'webdavNextcloud.config.pathAllow'	=> "Sync root scope",
 	'webdavNextcloud.config.pathAllowDesc'	=> "Root path scope visible to the Nextcloud Desktop client after login",
 	'webdavNextcloud.config.pathAllowAll'	=> "All spaces",
