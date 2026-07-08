@@ -38,6 +38,8 @@ class webdavNextcloudPlugin extends PluginBase{
 			substr($uri,0,10) == '/login/v2' ||
 			preg_match('#^/ocs/v[12]\.php/#',$uri) ||
 			preg_match('#^/remote\.php/dav/(files|uploads|avatars)/#',$uri) ||
+			preg_match('#^/(index\.php/)?f/[0-9]+#',$uri) ||
+			preg_match('#^/(index\.php/)?apps/activity/#',$uri) ||
 			preg_match('#^/(index\.php/)?apps/terms_of_service/#',$uri);
 	}
 	private function routeNextcloudCompat(){
@@ -86,6 +88,15 @@ class webdavNextcloudPlugin extends PluginBase{
 		}
 		if(preg_match('#^/ocs/v[12]\.php/core/apppassword/?$#',$uri)){
 			return $this->nextcloudDeleteAppPassword();
+		}
+		if(preg_match('#^/f/([0-9]+)(?:/.*)?$#',$uri,$match)){
+			return $this->nextcloudOpenInBrowser($match[1]);
+		}
+		if(preg_match('#^/ocs/v[12]\.php/apps/activity/api/v2/activity(?:/.*)?$#',$uri)){
+			return $this->nextcloudActivityApi();
+		}
+		if(preg_match('#^/apps/activity/#',$uri)){
+			return $this->nextcloudActivityPage();
 		}
 		if(preg_match('#^/ocs/v[12]\.php/apps/terms_of_service/terms/?$#',$uri)){
 			return $this->nextcloudOcsError(404,'Terms of service is not enabled.');
@@ -1117,7 +1128,7 @@ class webdavNextcloudPlugin extends PluginBase{
 		return true;
 	}
 	private function nextcloudToken(){
-		return rand_string(64,4);
+		return rand_string(32);
 	}
 	private function nextcloudUrl($path){
 		return $this->nextcloudBaseUrl().'/'.ltrim($path,'/');
@@ -1242,6 +1253,11 @@ class webdavNextcloudPlugin extends PluginBase{
 					'supportedTypes' => array('SHA1','MD5'),
 					'preferredUploadType' => 'MD5',
 				),
+				'activity' => array(
+					'apiv2' => array(
+						'filters' => array('all','files'),
+					),
+				),
 				'files_sharing' => array('api_enabled' => false),
 			),
 		);
@@ -1258,6 +1274,26 @@ class webdavNextcloudPlugin extends PluginBase{
 	private function nextcloudDeleteAppPassword(){
 		$this->nextcloudAuthUser();
 		$this->nextcloudOcsResponse(array());return true;
+	}
+	private function nextcloudOpenInBrowser($fileID){
+		$source = Model('Source')->where(array('sourceID'=>intval($fileID),'isDelete'=>0))->find();
+		if(!is_array($source) || !isset($source['sourceID'])){
+			return $this->nextcloudRedirect($this->nextcloudBaseUrl(),302);
+		}
+		$path = KodIO::make($source['sourceID']);
+		$route = intval(_get($source,'isFolder')) ? 'explorer' : 'fileView';
+		return $this->nextcloudRedirect($this->nextcloudBaseUrl().'#'.$route.'&path='.rawurlencode($path),302);
+	}
+	private function nextcloudActivityApi(){
+		if(!$this->nextcloudAuthUser()) return true;
+		$this->nextcloudOcsResponse(array());return true;
+	}
+	private function nextcloudActivityPage(){
+		header('Content-Type: text/html; charset=utf-8');
+		header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+		header('Pragma: no-cache');
+		echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Activity</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:#f6f8fb;color:#172033;margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px}.box{max-width:420px;background:#fff;border:1px solid #dce5ee;border-radius:10px;padding:30px;text-align:center;box-shadow:0 14px 40px rgba(23,32,51,.08)}h1{font-size:22px;margin:0 0 10px}p{color:#637083;line-height:1.55;margin:0 0 20px}.btn{display:inline-block;background:#0082c9;color:#fff;text-decoration:none;border-radius:6px;padding:10px 18px;font-weight:600}</style></head><body><main class="box"><h1>文件动态</h1><p>当前兼容层暂未提供详细动态记录，可返回网盘查看文件。</p><a class="btn" href="'.htmlspecialchars($this->nextcloudBaseUrl()).'">打开网盘</a></main></body></html>';
+		return true;
 	}
 	private function nextcloudAuthUser($expectUser=false){
 		$user = HttpAuth::get();
