@@ -89,6 +89,9 @@ class webdavNextcloudPlugin extends PluginBase{
 		if(preg_match('#^/ocs/v[12]\.php/core/apppassword/?$#',$uri)){
 			return $this->nextcloudDeleteAppPassword();
 		}
+		if(preg_match('#^/ocs/v[12]\.php/apps/files_sharing/api/v1/(shares|sharees|sharees_recommended|deletedshares|remote_shares)(?:/.*)?$#',$uri)){
+			return $this->nextcloudSharingApi($uri);
+		}
 		if(preg_match('#^/f/([0-9]+)(?:/.*)?$#',$uri,$match)){
 			return $this->nextcloudOpenInBrowser($match[1]);
 		}
@@ -105,7 +108,7 @@ class webdavNextcloudPlugin extends PluginBase{
 			return $this->nextcloudStatusCode(404);
 		}
 		if(preg_match('#^/ocs/v[12]\.php/core/navigation/apps/?$#',$uri)){
-			$this->nextcloudOcsResponse(array('apps'=>array()));return true;
+			return $this->nextcloudNavigationApps();
 		}
 		if(preg_match('#^/remote\.php/dav/avatars/[^/]+/[0-9]+\.png$#',$uri)){
 			return $this->nextcloudAvatar();
@@ -123,11 +126,55 @@ class webdavNextcloudPlugin extends PluginBase{
 				if(!defined('KOD_NEXTCLOUD_COMPAT')) define('KOD_NEXTCLOUD_COMPAT',1);
 				return $this->nextcloudFilePutRoute($match[1],isset($match[2]) ? $match[2] : '/');
 			}
+			if($_SERVER['REQUEST_METHOD'] == 'HEAD'){
+				if(!defined('KOD_NEXTCLOUD_COMPAT')) define('KOD_NEXTCLOUD_COMPAT',1);
+				if($this->nextcloudMobileHeadRoute($match[1],isset($match[2]) ? $match[2] : '/')) return true;
+			}
 			$davPre = $compatPrefix.'/remote.php/dav/files/'.$match[1].'/';
 			if(!defined('KOD_NEXTCLOUD_COMPAT')) define('KOD_NEXTCLOUD_COMPAT',1);
 			$this->run($davPre);exit;
 		}
 		return false;
+	}
+	private function nextcloudMobileHeadRoute($user,$path){
+		if(!$this->nextcloudIsMobileClient()) return false;
+		$destRel = '/'.trim(rawurldecode($path),'/');
+		if(!$this->nextcloudMobileNakedPersonalRel($destRel)) return false;
+		require_once($this->pluginPath.'php/webdavServer.class.php');
+		require_once($this->pluginPath.'php/webdavServerKod.class.php');
+		$dav = new webdavServerKod('/remote.php/dav/files/'.$user.'/');
+		$kodPath = rtrim(MY_HOME,'/').'/'.trim($destRel,'/');
+		$info = $this->nextcloudSafeInfoFull($kodPath);
+		$this->log('nextcloud mobile naked HEAD: user='.$user.';rel='.$destRel.';path='.$kodPath.';exists='.($info ? 1 : 0).';size='.intval(_get($info,'size')));
+		if(!$info){
+			return $this->nextcloudRawResponse(404,array('Content-Length: 0','X-DAV-BY: kodbox-nextcloud-mobile-head'));
+		}
+		$headers = array('X-DAV-BY: kodbox-nextcloud-mobile-head');
+		$etag = md5(implode('|',array(_get($info,'sourceID'),_get($info,'type'),_get($info,'modifyTime'),_get($info,'size'),_get($info,'fileInfo.hashMd5'))));
+		$headers[] = 'ETag: "'.$etag.'"';
+		$headers[] = 'OC-ETag: "'.$etag.'"';
+		$headers[] = 'Last-Modified: '.gmdate('D, d M Y H:i:s ',intval(_get($info,'modifyTime',time()))).'GMT';
+		if(_get($info,'type') == 'folder' || intval(_get($info,'isFolder')) == 1){
+			$headers[] = 'Content-Type: httpd/unix-directory';
+			$headers[] = 'Content-Length: 0';
+		}else{
+			$headers[] = 'Accept-Ranges: bytes';
+			$headers[] = 'Content-Type: '.get_file_mime(_get($info,'ext'));
+			$headers[] = 'Content-Length: '.intval(_get($info,'size'));
+		}
+		return $this->nextcloudRawResponse(200,$headers);
+	}
+	private function nextcloudMobileNakedPersonalRel($destRel){
+		$rel = trim($destRel,'/');
+		if(!$rel) return false;
+		$first = explode('/',$rel)[0];
+		$reserved = array(
+			LNG('explorer.toolbar.rootPath') => true,
+			LNG('explorer.toolbar.myGroup') => true,
+			LNG('explorer.toolbar.fav') => true,
+		);
+		if(isset($reserved[$first])) return false;
+		return true;
 	}
 	private function nextcloudFilePutRoute($user,$path){
 		ignore_user_abort(true);
@@ -148,14 +195,29 @@ class webdavNextcloudPlugin extends PluginBase{
 			'time' => time(),
 		);
 		$this->log('nextcloud file put route start: user='.$user.';path='.$path.';size='._get($GLOBALS,'KOD_NEXTCLOUD_PUT_FALLBACK.size').';uri='._get($GLOBALS,'KOD_NEXTCLOUD_PUT_FALLBACK.uri'));
-		return $this->nextcloudFilePutRouteInner($user,$path);
+		$oldErrorReporting = error_reporting();
+		$oldDisplayErrors = ini_get('display_errors');
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		@ini_set('display_errors','0');
+		error_reporting($oldErrorReporting & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		try{
+			return $this->nextcloudFilePutRouteInner($user,$path);
+		}catch(Throwable $e){
+			$this->log('nextcloud file put route exception captured: user='.$user.';path='.$path.';error='.$e->getMessage());
+			return $this->nextcloudFilePutExceptionResponse($e);
+		}finally{
+			error_reporting($oldErrorReporting);
+			@ini_set('display_errors',$oldDisplayErrors);
+			$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
+		}
 		try{
 			$dav->checkUser();
 			$dav->initPath('/remote.php/dav/files/'.$user.'/');
 			$targetPath = $this->nextcloudDavTargetPath($dav,$path);
 			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['targetPath'] = $targetPath;
 			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['targetName'] = $targetPath ? get_path_this($targetPath) : $GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['targetName'];
-			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['existsBefore'] = $targetPath ? !!IO::infoFull($targetPath) : false;
+			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['existsBefore'] = $targetPath ? !!$this->nextcloudSafeInfoFull($targetPath) : false;
 			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['active'] = false;
 			$GLOBALS['KOD_WEBDAV_SYNC_UPLOAD'] = true;
 			$result = $dav->httpPUT();
@@ -169,7 +231,7 @@ class webdavNextcloudPlugin extends PluginBase{
 			$ctx = isset($GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']) ? $GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK'] : array();
 			$targetPath = isset($ctx['targetPath']) ? $ctx['targetPath'] : '';
 			$size = isset($ctx['size']) ? intval($ctx['size']) : 0;
-			$info = $targetPath ? IO::infoFull($targetPath) : false;
+			$info = $targetPath ? $this->nextcloudSafeInfoFull($targetPath) : false;
 			if(!$info && $targetPath){
 				$info = $this->nextcloudFindUploadedInfo($targetPath,isset($ctx['targetName']) ? $ctx['targetName'] : get_path_this($targetPath),$size);
 			}
@@ -183,15 +245,49 @@ class webdavNextcloudPlugin extends PluginBase{
 			return $this->nextcloudRawResponse(503,array('Content-Length: 0','X-DAV-ERROR: exception'));
 		}
 	}
+	private function nextcloudFilePutExceptionResponse($e){
+		$ctx = isset($GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']) ? $GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK'] : array();
+		$targetPath = isset($ctx['targetPath']) ? $ctx['targetPath'] : '';
+		$targetName = isset($ctx['targetName']) ? $ctx['targetName'] : get_path_this($targetPath);
+		$size = isset($ctx['size']) ? intval($ctx['size']) : 0;
+		$info = $targetPath ? $this->nextcloudFindUploadedInfo($targetPath,$targetName,$size) : false;
+		$ok = $this->nextcloudUploadInfoMatches($info,$targetName,$size);
+		$json = $this->nextcloudJsonFromOutput($e->getMessage());
+		if(!$ok && $targetPath){
+			$bodyFile = $this->nextcloudRequestBodyFile($size);
+			if($bodyFile && is_file($bodyFile)){
+				$this->log('nextcloud file put exception body-file fallback: target='.$targetPath.';file='.$bodyFile.';size='.@filesize($bodyFile).';expect='.$size);
+				$fallback = $this->nextcloudUploadLocalFile($targetPath,$bodyFile);
+				if($fallback){
+					$info = $this->nextcloudFindUploadedInfo($targetPath,$targetName,$size);
+					$ok = $this->nextcloudUploadInfoMatches($info,$targetName,$size);
+				}
+			}
+		}
+		$this->log('nextcloud file put exception verify: ok='.($ok ? 1 : 0).';target='.$targetPath.';targetName='.$targetName.';size='.$size.';remoteSize='.(is_array($info) ? intval(_get($info,'size')) : -1).';json='.($json ? json_encode($json) : '').';lastError='.json_encode(IO::getLastError()));
+		if(!$ok){
+			return $this->nextcloudRawResponse(503,array('Content-Length: 0','X-DAV-ERROR: put-exception'));
+		}
+		$path = _get($info,'path',$targetPath);
+		$version = $this->nextcloudBumpEtag($path);
+		if($version) $info['metaInfo']['webdavEtag'] = $version;
+		$this->nextcloudBumpEtag(IO::pathFather($path));
+		$etag = $this->nextcloudUploadedEtag($path,$info);
+		$code = !empty($ctx['existsBefore']) ? 204 : 201;
+		$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['active'] = false;
+		return $this->nextcloudRawResponse($code,$this->nextcloudUploadResponseHeaders($etag,'kodbox-nextcloud-put-exception'));
+	}
 	private function nextcloudDavTargetPath($dav,$path){
 		$destRel = '/'.trim(rawurldecode($path),'/');
-		if($this->nextcloudCompatRootWriteRelBlocked($destRel)){
+		$mobileRoot = $this->nextcloudMobileRootUploadRel($destRel);
+		if($this->nextcloudCompatRootWriteRelBlocked($destRel) && !$mobileRoot){
 			$this->log('nextcloud target path root write blocked: destRel='.$destRel);
 			return '';
 		}
 		$targetName = get_path_this($destRel);
 		$parentRel = get_path_father($destRel);
-		$parentPath = $dav->parsePath($parentRel ? $parentRel : '/');
+		$parentPath = $mobileRoot ? MY_HOME : $dav->parsePath($parentRel ? $parentRel : '/');
+		$parentPath = $this->nextcloudMobilePersonalParentPath($parentPath,$parentRel);
 		if(!$targetName || !$parentPath){
 			$this->log('nextcloud target path parse failed: destRel='.$destRel.';parentRel='.$parentRel.';parentPath='.$parentPath);
 			return '';
@@ -205,13 +301,15 @@ class webdavNextcloudPlugin extends PluginBase{
 		require_once($this->pluginPath.'php/webdavServerKod.class.php');
 		$dav = new webdavServerKod('/remote.php/dav/files/'.$user.'/');
 		$destRel = '/'.trim(rawurldecode($path),'/');
-		if($this->nextcloudCompatRootWriteRelBlocked($destRel)){
+		$mobileRoot = $this->nextcloudMobileRootUploadRel($destRel);
+		if($this->nextcloudCompatRootWriteRelBlocked($destRel) && !$mobileRoot){
 			$this->log('nextcloud file put root write blocked: user='.$user.';destRel='.$destRel);
 			return $this->nextcloudRawResponse(403,array('Content-Length: 0','X-DAV-ERROR: nextcloud-root-is-readonly'));
 		}
 		$targetName = get_path_this($destRel);
 		$parentRel = get_path_father($destRel);
-		$parentPath = $dav->parsePath($parentRel ? $parentRel : '/');
+		$parentPath = $mobileRoot ? MY_HOME : $dav->parsePath($parentRel ? $parentRel : '/');
+		$parentPath = $this->nextcloudMobilePersonalParentPath($parentPath,$parentRel);
 		if(!$targetName || !$parentPath){
 			$this->log('nextcloud file put path parse failed: user='.$user.';destRel='.$destRel.';parentRel='.$parentRel.';parentPath='.$parentPath);
 			return $this->nextcloudRawResponse(409,array('Content-Length: 0'));
@@ -219,10 +317,12 @@ class webdavNextcloudPlugin extends PluginBase{
 		$targetPath = rtrim($parentPath,'/').'/'.$targetName;
 		$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['targetPath'] = $targetPath;
 		$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['targetName'] = $targetName;
-		$targetInfo = IO::infoFull($targetPath);
+		$targetInfo = $this->nextcloudSafeInfoFull($targetPath);
 		$existsBefore = !!$targetInfo;
 		$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['existsBefore'] = $existsBefore;
-		if(!$dav->can($parentPath,'edit') && (!$targetInfo || !$dav->can($targetPath,'edit'))){
+		$canParentEdit = $this->nextcloudDavCan($dav,$parentPath,'edit');
+		$canTargetEdit = $targetInfo ? $this->nextcloudDavCan($dav,$targetPath,'edit') : false;
+		if(!$canParentEdit && (!$targetInfo || !$canTargetEdit)){
 			$this->log('nextcloud file put permission denied: targetPath='.$targetPath.';parentPath='.$parentPath);
 			return $this->nextcloudRawResponse(403,array('Content-Length: 0'));
 		}
@@ -314,6 +414,66 @@ class webdavNextcloudPlugin extends PluginBase{
 		$items = explode('/',trim($destRel,'/'));
 		if(!trim($destRel,'/')) return true;
 		return count($items) <= 1;
+	}
+	private function nextcloudMobileRootUploadRel($destRel){
+		if(!$this->nextcloudCompatRootWriteRelBlocked($destRel)) return false;
+		$name = trim($destRel,'/');
+		if(!$name || strpos($name,'/') !== false) return false;
+		return $this->nextcloudIsMobileUploadClient();
+	}
+	private function nextcloudMobilePersonalParentPath($parentPath,$parentRel){
+		if(!$this->nextcloudIsMobileUploadClient()) return $parentPath;
+		if($parentPath){
+			$home = rtrim(MY_HOME,'/').'/';
+			if(strpos(rtrim($parentPath,'/').'/', $home) === 0 && !IO::exist($parentPath)){
+				return IO::mkdir($parentPath) ? $parentPath : false;
+			}
+			return $parentPath;
+		}
+		$rel = trim($parentRel,'/');
+		if(!$rel) return MY_HOME;
+		$path = rtrim(MY_HOME,'/').'/'.$rel;
+		return IO::mkdir($path) ? $path : false;
+	}
+	private function nextcloudIsMobileUploadClient(){
+		$method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper($_SERVER['REQUEST_METHOD']) : '';
+		if($method != 'PUT' && $method != 'MKCOL') return false;
+		return $this->nextcloudIsMobileClient();
+	}
+	private function nextcloudIsMobileClient(){
+		$ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+		return !!preg_match('/(android|ios|iphone|ipad|mobile|nextcloud-android|nextcloud-ios|nextcloudphotos|nextcloud.*mobile)/i',$ua);
+	}
+	private function nextcloudDavCan($dav,$path,$action){
+		if(!$path) return false;
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		try{
+			return !!$dav->can($path,$action);
+		}catch(Throwable $e){
+			$this->log('nextcloud dav can exception: path='.$path.';action='.$action.';error='.$e->getMessage());
+			return false;
+		}finally{
+			$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
+		}
+	}
+	private function nextcloudSafeInfoFull($path){
+		if(!$path) return false;
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		try{
+			$info = IO::infoFull($path);
+			return is_array($info) ? $info : false;
+		}catch(Throwable $e){
+			$json = $this->nextcloudJsonFromOutput($e->getMessage());
+			$msg = is_array($json) ? _get($json,'data','') : $e->getMessage();
+			if($msg && strpos($msg,'不存在') === false && stripos($msg,'not') === false){
+				$this->log('nextcloud safe info exception: path='.$path.';error='.$e->getMessage());
+			}
+			return false;
+		}finally{
+			$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
+		}
 	}
 	private function nextcloudLegacyChunkRoute($user,$path){
 		$method = $_SERVER['REQUEST_METHOD'];
@@ -519,7 +679,7 @@ class webdavNextcloudPlugin extends PluginBase{
 		return $headers;
 	}
 	private function nextcloudFinalizeUploadedEtag($path){
-		$info = IO::infoFull($path);
+		$info = $this->nextcloudSafeInfoFull($path);
 		$version = $this->nextcloudBumpEtag($path);
 		if(is_array($info) && $version) $info['metaInfo']['webdavEtag'] = $version;
 		$this->nextcloudBumpEtag(IO::pathFather($path));
@@ -530,21 +690,25 @@ class webdavNextcloudPlugin extends PluginBase{
 		require_once($this->pluginPath.'php/webdavServerKod.class.php');
 		$dav = new webdavServerKod('/remote.php/dav/files/'.$user.'/');
 		$destRel = '/'.trim($destRel,'/');
-		if($this->nextcloudCompatRootWriteRelBlocked($destRel)){
+		$mobileRoot = $this->nextcloudMobileRootUploadRel($destRel);
+		if($this->nextcloudCompatRootWriteRelBlocked($destRel) && !$mobileRoot){
 			$this->log('nextcloud merged upload root write blocked: user='.$user.';destRel='.$destRel);
 			return false;
 		}
 		$targetName = get_path_this($destRel);
 		$parentRel = get_path_father($destRel);
-		$parentPath = $dav->parsePath($parentRel ? $parentRel : '/');
+		$parentPath = $mobileRoot ? MY_HOME : $dav->parsePath($parentRel ? $parentRel : '/');
+		$parentPath = $this->nextcloudMobilePersonalParentPath($parentPath,$parentRel);
 		if(!$targetName || !$parentPath){
 			$this->log('nextcloud merged upload path parse failed: user='.$user.';destRel='.$destRel.';parentRel='.$parentRel.';parentPath='.$parentPath);
 			return false;
 		}
 		$targetPath = rtrim($parentPath,'/').'/'.$targetName;
-		$targetInfo = IO::infoFull($targetPath);
+		$targetInfo = $this->nextcloudSafeInfoFull($targetPath);
 		$uploadPath = $targetInfo ? $targetInfo['path'] : $targetPath;
-		if(!$dav->can($parentPath,'edit') && (!$targetInfo || !$dav->can($uploadPath,'edit'))){
+		$canParentEdit = $this->nextcloudDavCan($dav,$parentPath,'edit');
+		$canTargetEdit = $targetInfo ? $this->nextcloudDavCan($dav,$uploadPath,'edit') : false;
+		if(!$canParentEdit && (!$targetInfo || !$canTargetEdit)){
 			$this->log('nextcloud merged upload permission denied: uploadPath='.$uploadPath.';parentPath='.$parentPath.';destRel='.$destRel);
 			return false;
 		}
@@ -700,7 +864,7 @@ class webdavNextcloudPlugin extends PluginBase{
 		return false;
 	}
 	private function nextcloudDiagLog($message){
-		if(_get($this->getConfig(),'nextcloudCompatLog') != '1') return;
+		if(!$this->nextcloudLogEnabled()) return;
 		if(function_exists('write_log')){
 			write_log('[NEXTCLOUD-COMPAT] '.$message,'webdavNextcloud');
 			return;
@@ -710,28 +874,41 @@ class webdavNextcloudPlugin extends PluginBase{
 	private function nextcloudFindUploadedInfo($targetPath,$targetName,$size){
 		$parentPath = IO::pathFather($targetPath);
 		for($i = 0;$i < 20;$i++){
-			$info = IO::infoFull($targetPath);
-			if($info && intval(_get($info,'size')) == $size) return $info;
+			$info = $this->nextcloudSafeInfoFull($targetPath);
+			if($this->nextcloudUploadInfoMatches($info,$targetName,$size)) return $info;
 			$list = Action('explorer.list')->path($parentPath);
 			if(is_array($list) && is_array($list['fileList'])){
 				foreach($list['fileList'] as $item){
-					if(_get($item,'name') != $targetName) continue;
-					if(intval(_get($item,'size')) != $size) continue;
-					$info = IO::infoFull($item['path']);
-					return $info ? $info : $item;
+					if(!$this->nextcloudUploadInfoMatches($item,$targetName,$size)) continue;
+					$info = $this->nextcloudSafeInfoFull($item['path']);
+					return $this->nextcloudUploadInfoMatches($info,$targetName,$size) ? $info : $item;
 				}
 			}
 			usleep(200000);
 		}
 		return false;
 	}
+	private function nextcloudUploadInfoMatches($info,$targetName,$size){
+		if(!$info || !is_array($info)) return false;
+		$type = _get($info,'type');
+		$isFolder = _get($info,'isFolder');
+		if($type && $type != 'file') return false;
+		if($isFolder !== '' && intval($isFolder) == 1) return false;
+		$name = _get($info,'name');
+		if(!$name) $name = _get($info,'sourceInfo.name');
+		if(!$name && _get($info,'pathDisplay')) $name = get_path_this(_get($info,'pathDisplay'));
+		if($targetName !== '' && $name !== '' && $name != $targetName) return false;
+		if($targetName !== '' && $name === '') return false;
+		if($size >= 0 && intval(_get($info,'size')) != intval($size)) return false;
+		return true;
+	}
 	private function nextcloudVerifiedUploadInfo($resultPath,$targetPath,$targetName,$size){
 		$paths = array();
 		if($resultPath) $paths[] = $resultPath;
 		if($targetPath && $targetPath != $resultPath) $paths[] = $targetPath;
 		foreach($paths as $path){
-			$info = IO::infoFull($path);
-			if($info && intval(_get($info,'size')) == $size) return $info;
+			$info = $this->nextcloudSafeInfoFull($path);
+			if($this->nextcloudUploadInfoMatches($info,$targetName,$size)) return $info;
 		}
 		return $this->nextcloudFindUploadedInfo($targetPath,$targetName,$size);
 	}
@@ -748,57 +925,122 @@ class webdavNextcloudPlugin extends PluginBase{
 			$this->log('nextcloud set uploaded mtime exception: '.$e->getMessage().';path='.$path);
 			return $info;
 		}
-		if(!$info) $info = IO::infoFull($path);
+		if(!$info) $info = $this->nextcloudSafeInfoFull($path);
 		if(is_array($info)) $info['modifyTime'] = $mtime;
 		return $info;
 	}
 	private function nextcloudUploadLocalFile($uploadPath,$localFile){
 		$localSize = @filesize($localFile);
 		$directResult = false;
-		if(is_file($localFile)){
-			$directResult = $this->nextcloudUploadLocalFileFallback($uploadPath,$localFile,$localSize,'move');
-		}
-		if(!$directResult && is_file($localFile)){
-			$directResult = $this->nextcloudUploadLocalFileFallback($uploadPath,$localFile,$localSize,'copy');
+		$isLocalFilesystemFile = $this->nextcloudIsLocalFilesystemFile($localFile);
+		$isNginxBodyFile = $localFile && _get($_SERVER,'KOD_NGINX_BODY_FILE') && $localFile == _get($_SERVER,'KOD_NGINX_BODY_FILE');
+		$this->log('nextcloud upload local enter: path='.$uploadPath.';local='.$localFile.';localSize='.$localSize.';isLocal=' . ($isLocalFilesystemFile ? 1 : 0).';exists='.(is_file($localFile) ? 1 : 0));
+		if(!$directResult && !$isNginxBodyFile && is_file($localFile)){
+			try{
+				$directResult = $this->nextcloudUploadLocalFileFallback($uploadPath,$localFile,$localSize,'copy');
+			}catch(Throwable $e){
+				$this->log('nextcloud upload copy fallback escaped: path='.$uploadPath.';local='.$localFile.';error='.$e->getMessage());
+				$directResult = false;
+			}
 		}
 		if($directResult){
 			return is_string($directResult) ? $directResult : $uploadPath;
+		}
+		if($isLocalFilesystemFile && is_file($localFile)){
+			$canonicalResult = $this->nextcloudUploadLocalFileCanonical($uploadPath,$localFile,$localSize);
+			if($canonicalResult){
+				return is_string($canonicalResult) ? $canonicalResult : $uploadPath;
+			}
+			$saveResult = $this->nextcloudUploadLocalFileSaveFile($uploadPath,$localFile,$localSize);
+			if($saveResult){
+				return is_string($saveResult) ? $saveResult : $uploadPath;
+			}
+		}
+		if(!$directResult && !$isNginxBodyFile && is_file($localFile)){
+			try{
+				$directResult = $this->nextcloudUploadLocalFileFallback($uploadPath,$localFile,$localSize,'move');
+			}catch(Throwable $e){
+				$this->log('nextcloud upload move fallback escaped: path='.$uploadPath.';local='.$localFile.';error='.$e->getMessage());
+				$directResult = false;
+			}
+		}
+		if($directResult){
+			return is_string($directResult) ? $directResult : $uploadPath;
+		}
+		if(!is_file($localFile)){
+			$this->log('nextcloud upload local source missing before io-upload: path='.$uploadPath.';local='.$localFile.';localSize='.$localSize);
+			return false;
+		}
+		if($isNginxBodyFile){
+			$this->log('nextcloud upload local nginx body fallback failed before io-upload: path='.$uploadPath.';local='.$localFile.';localSize='.$localSize);
+			return false;
 		}
 		$oldUploadPath = array_key_exists('KOD_WEBDAV_UPLOAD_PATH',$GLOBALS) ? $GLOBALS['KOD_WEBDAV_UPLOAD_PATH'] : null;
 		$oldCapture = array_key_exists('KOD_WEBDAV_CAPTURE_UPLOAD',$GLOBALS) ? $GLOBALS['KOD_WEBDAV_CAPTURE_UPLOAD'] : null;
 		$oldNotExit = array_key_exists('SHOW_JSON_NOT_EXIT',$GLOBALS) ? $GLOBALS['SHOW_JSON_NOT_EXIT'] : null;
 		$oldNotExitDone = array_key_exists('SHOW_JSON_NOT_EXIT_DONE',$GLOBALS) ? $GLOBALS['SHOW_JSON_NOT_EXIT_DONE'] : null;
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
 		$oldPutFallbackActive = isset($GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['active']) ? $GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['active'] : null;
+		$oldInExists = array_key_exists('in',$GLOBALS);
+		$oldIn = $oldInExists ? $GLOBALS['in'] : null;
+		$uploadParent = rtrim(get_path_father($uploadPath),'/').'/';
+		$uploadName = get_path_this($uploadPath);
 		$GLOBALS['KOD_WEBDAV_UPLOAD_PATH'] = $uploadPath;
 		$GLOBALS['KOD_WEBDAV_CAPTURE_UPLOAD'] = true;
 		$GLOBALS['SHOW_JSON_NOT_EXIT'] = true;
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = false;
+		if(!isset($GLOBALS['in']) || !is_array($GLOBALS['in'])){
+			$GLOBALS['in'] = array();
+		}
+		$GLOBALS['in']['path'] = $uploadParent;
+		$GLOBALS['in']['name'] = $uploadName;
+		$GLOBALS['in']['size'] = intval($localSize);
+		$GLOBALS['in']['fileRepeat'] = REPEAT_REPLACE;
+		$GLOBALS['in']['repeatType'] = REPEAT_REPLACE;
+		$ocMtime = intval(_get($_SERVER,'HTTP_X_OC_MTIME'));
+		if($ocMtime > 1000){
+			$GLOBALS['in']['modifyTime'] = $ocMtime;
+		}
 		if(isset($GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK'])){
 			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['active'] = false;
 		}
 		unset($GLOBALS['SHOW_JSON_NOT_EXIT_DONE']);
 		$result = false;
 		$output = '';
+		$this->log('nextcloud upload local start: path='.$uploadPath.';parent='.$uploadParent.';name='.$uploadName.';local='.$localFile.';localSize='.$localSize.';showOut='.(isset($GLOBALS['SHOW_OUT_EXCEPTION']) && $GLOBALS['SHOW_OUT_EXCEPTION'] ? 1 : 0).';showJson='.(isset($GLOBALS['SHOW_JSON_NOT_EXIT']) && $GLOBALS['SHOW_JSON_NOT_EXIT'] ? 1 : 0));
 		ob_start();
 		try{
 			$result = IO::upload($uploadPath,$localFile,true,REPEAT_REPLACE);
 			$output = ob_get_clean();
 		}catch(Throwable $e){
-			$output = ob_get_clean();
+			$output = ob_get_level() > 0 ? ob_get_clean() : '';
 			$output .= $e->getMessage();
+			$json = $this->nextcloudJsonFromOutput($e->getMessage());
+			if(is_array($json) && !empty($json['code'])){
+				$result = $uploadPath;
+			}else{
+				$this->log('nextcloud upload local io-upload exception: path='.$uploadPath.';local='.$localFile.';error='.$e->getMessage());
+			}
 		}
 		$this->nextcloudGlobalRestore('KOD_WEBDAV_UPLOAD_PATH',$oldUploadPath);
 		$this->nextcloudGlobalRestore('KOD_WEBDAV_CAPTURE_UPLOAD',$oldCapture);
 		$this->nextcloudGlobalRestore('SHOW_JSON_NOT_EXIT',$oldNotExit);
 		$this->nextcloudGlobalRestore('SHOW_JSON_NOT_EXIT_DONE',$oldNotExitDone);
+		$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
 		if($oldPutFallbackActive !== null && isset($GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK'])){
 			$GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']['active'] = $oldPutFallbackActive;
+		}
+		if($oldInExists){
+			$GLOBALS['in'] = $oldIn;
+		}else{
+			unset($GLOBALS['in']);
 		}
 		$json = $this->nextcloudJsonFromOutput($output);
 		if(!$result && is_array($json) && !empty($json['code'])){
 			$result = $uploadPath;
 		}
 		if($output !== ''){
-			$this->log('nextcloud upload captured output: path='.$uploadPath.';len='.strlen($output).';success='.(is_array($json) && !empty($json['code']) ? 1:0).';json='.($json ? json_encode($json) : substr($output,0,500)).';lastError='.json_encode(IO::getLastError()));
+			$this->log('nextcloud upload captured output: path='.$uploadPath.';parent='.$uploadParent.';name='.$uploadName.';len='.strlen($output).';success='.(is_array($json) && !empty($json['code']) ? 1:0).';json='.($json ? json_encode($json) : substr($output,0,500)).';lastError='.json_encode(IO::getLastError()));
 		}
 		if($result){
 			$resultPath = is_string($result) ? $result : $uploadPath;
@@ -810,30 +1052,162 @@ class webdavNextcloudPlugin extends PluginBase{
 			}
 		}
 		if(!$result){
-			$this->log('nextcloud upload local failed: path='.$uploadPath.';local='.$localFile.';localSize='.$localSize.';exists='.(is_file($localFile) ? 1 : 0).';lastError='.json_encode(IO::getLastError()).';output='.substr($output,0,500));
+			if($isLocalFilesystemFile && is_file($localFile)){
+				$saveResult = $this->nextcloudUploadLocalFileSaveFile($uploadPath,$localFile,$localSize);
+				if($saveResult){
+					return is_string($saveResult) ? $saveResult : $uploadPath;
+				}
+			}
+			$this->log('nextcloud upload local failed: path='.$uploadPath.';parent='.$uploadParent.';name='.$uploadName.';local='.$localFile.';localSize='.$localSize.';exists='.(is_file($localFile) ? 1 : 0).';lastError='.json_encode(IO::getLastError()).';output='.substr($output,0,500));
 		}
 		return $result ? (is_string($result) ? $result : $uploadPath) : false;
+	}
+	private function nextcloudUploadLocalFileCanonical($uploadPath,$localFile,$localSize){
+		$uploadParent = rtrim(get_path_father($uploadPath),'/').'/';
+		$uploadName = get_path_this($uploadPath);
+		$parentInfo = $this->nextcloudSafeInfoFull($uploadParent);
+		$parentID = intval(_get($parentInfo,'sourceID'));
+		if(!$parentID || !$uploadName) return false;
+		$canonicalPath = '{source:'.$parentID.'}/'.$uploadName;
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		$oldDisplayErrors = ini_get('display_errors');
+		$oldErrorReporting = error_reporting();
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		@ini_set('display_errors','0');
+		error_reporting($oldErrorReporting & ~E_DEPRECATED & ~E_USER_DEPRECATED);
+		$output = '';
+		$result = false;
+		ob_start();
+		try{
+			$result = IO::upload($canonicalPath,$localFile,false,REPEAT_REPLACE);
+			$output = ob_get_clean();
+		}catch(Throwable $e){
+			$output = ob_get_clean();
+			$output .= $e->getMessage();
+		}finally{
+			error_reporting($oldErrorReporting);
+			@ini_set('display_errors',$oldDisplayErrors);
+			$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
+		}
+		$resultPath = is_string($result) ? $result : ($result ? $canonicalPath : '');
+		$info = $resultPath ? $this->nextcloudVerifiedUploadInfo($resultPath,$uploadPath,$uploadName,intval($localSize)) : false;
+		$ok = $this->nextcloudUploadInfoMatches($info,$uploadName,intval($localSize));
+		$this->log('nextcloud canonical upload: ok='.($ok ? 1 : 0).';path='.$uploadPath.';canonical='.$canonicalPath.';result='.(is_string($result) ? $result : ($result ? 1 : 0)).';local='.$localFile.';localSize='.$localSize.';remoteSize='.(is_array($info) ? intval(_get($info,'size')) : -1).';output='.substr($output,0,200).';lastError='.json_encode(IO::getLastError()));
+		return $ok ? _get($info,'path',$resultPath) : false;
+	}
+	private function nextcloudUploadLocalFileSaveFile($uploadPath,$localFile,$localSize){
+		$uploadParent = rtrim(get_path_father($uploadPath),'/').'/';
+		$uploadName = get_path_this($uploadPath);
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		try{
+			if(!IO::exist($uploadParent)){
+				$parentMade = IO::mkdir($uploadParent);
+				if(!$parentMade){
+					$this->log('nextcloud saveFile parent mkdir failed: parent='.$uploadParent.';path='.$uploadPath.';lastError='.json_encode(IO::getLastError()));
+					return false;
+				}
+			}
+			$targetPath = $uploadPath;
+			$targetInfo = IO::exist($targetPath) ? $this->nextcloudSafeInfoFull($targetPath) : false;
+			$createdNew = false;
+			if(!$targetInfo){
+				$this->nextcloudSourceEventStop();
+				try{
+					$targetPath = IO::mkfile($uploadPath,'',REPEAT_REPLACE);
+				}finally{
+					$this->nextcloudSourceEventStart();
+				}
+				$createdNew = !!$targetPath;
+				$targetInfo = $targetPath ? $this->nextcloudSafeInfoFull($targetPath) : false;
+			}
+			if(!$targetInfo || !_get($targetInfo,'path')){
+				$this->log('nextcloud saveFile target create failed: path='.$uploadPath.';result='.$targetPath.';lastError='.json_encode(IO::getLastError()));
+				return false;
+			}
+			$result = IO::saveFile($localFile,$targetInfo['path']);
+			$info = $result ? $this->nextcloudVerifiedUploadInfo($targetInfo['path'],$uploadPath,$uploadName,intval($localSize)) : false;
+			$ok = $this->nextcloudUploadInfoMatches($info,$uploadName,intval($localSize));
+			$this->log('nextcloud saveFile upload: ok='.($ok ? 1 : 0).';path='.$uploadPath.';target='.$targetInfo['path'].';local='.$localFile.';localSize='.$localSize.';remoteSize='.(is_array($info) ? intval(_get($info,'size')) : -1).';result='.($result ? 1 : 0).';lastError='.json_encode(IO::getLastError()));
+			if(!$ok && $createdNew && _get($targetInfo,'path')){
+				IO::remove($targetInfo['path'],false);
+			}
+			return $ok ? _get($info,'path',$targetInfo['path']) : false;
+		}catch(Throwable $e){
+			$this->log('nextcloud saveFile upload exception: path='.$uploadPath.';local='.$localFile.';error='.$e->getMessage());
+			return false;
+		}finally{
+			$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
+		}
+	}
+	private function nextcloudSourceEventStop(){
+		try{
+			Model('SourceEvent')->recodeStop();
+		}catch(Throwable $e){
+			$this->log('nextcloud source event stop exception: '.$e->getMessage());
+		}
+	}
+	private function nextcloudSourceEventStart(){
+		try{
+			Model('SourceEvent')->recodeStart();
+		}catch(Throwable $e){
+			$this->log('nextcloud source event start exception: '.$e->getMessage());
+		}
+	}
+	private function nextcloudIsLocalFilesystemFile($path){
+		if(!$path || !is_string($path)) return false;
+		if(strpos($path,'{') === 0 || strpos($path,'kodio://') === 0) return false;
+		if(preg_match('/^[A-Za-z0-9_]+:\/\//',$path)) return false;
+		return is_file($path) && (strpos($path,'/') === 0 || preg_match('/^[A-Za-z]:[\/\\\\]/',$path));
 	}
 	private function nextcloudUploadLocalFileFallback($uploadPath,$localFile,$localSize,$mode){
 		$savePath = rtrim(get_path_father($uploadPath),'/').'/';
 		$fileName = get_path_this($uploadPath);
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		$oldErrorReporting = error_reporting();
+		$oldDisplayErrors = ini_get('display_errors');
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
 		$result = false;
+		$output = '';
+		ob_start();
+		@ini_set('display_errors','0');
+		error_reporting($oldErrorReporting & ~E_DEPRECATED & ~E_USER_DEPRECATED);
 		try{
+			if(!IO::exist($savePath)){
+				IO::mkdir($savePath);
+			}
 			if($mode == 'move'){
 				$result = IO::move($localFile,$savePath,REPEAT_REPLACE,$fileName);
 			}else{
 				$result = IO::copy($localFile,$savePath,REPEAT_REPLACE,$fileName);
 			}
+			$output = ob_get_clean();
 		}catch(Throwable $e){
-			$this->log('nextcloud upload fallback exception: mode='.$mode.';path='.$uploadPath.';local='.$localFile.';error='.$e->getMessage());
-			return false;
+			$output = ob_get_clean();
+			$json = $this->nextcloudJsonFromOutput($e->getMessage());
+			if(is_array($json) && !empty($json['code'])){
+				$result = $uploadPath;
+			}else{
+				$output .= $e->getMessage();
+			}
+			error_reporting($oldErrorReporting);
+			@ini_set('display_errors',$oldDisplayErrors);
+			$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
+			if(!$result){
+				$this->log('nextcloud upload fallback exception: mode='.$mode.';path='.$uploadPath.';local='.$localFile.';json='.($json ? json_encode($json) : '').';error='.$e->getMessage());
+				return false;
+			}
 		}
+		error_reporting($oldErrorReporting);
+		@ini_set('display_errors',$oldDisplayErrors);
+		$this->nextcloudGlobalRestore('SHOW_OUT_EXCEPTION',$oldOutException);
 		$resultPath = is_string($result) ? $result : $uploadPath;
 		$info = $this->nextcloudVerifiedUploadInfo($resultPath,$uploadPath,$fileName,intval($localSize));
 		$remoteSize = is_array($info) ? intval(_get($info,'size')) : -1;
-		$ok = $result && $info && intval($remoteSize) == intval($localSize);
-		$this->log('nextcloud upload fallback: mode='.$mode.';ok='.($ok ? 1 : 0).';path='.$uploadPath.';result='.(is_string($result) ? $result : ($result ? 1 : 0)).';local='.$localFile.';localSize='.$localSize.';remoteSize='.$remoteSize.';lastError='.json_encode(IO::getLastError()));
-		return $ok ? $resultPath : false;
+		$ok = $result && $this->nextcloudUploadInfoMatches($info,$fileName,intval($localSize));
+		$verifiedPath = $ok && _get($info,'path') ? _get($info,'path') : $resultPath;
+		$this->log('nextcloud upload fallback: mode='.$mode.';ok='.($ok ? 1 : 0).';path='.$uploadPath.';result='.(is_string($result) ? $result : ($result ? 1 : 0)).';verified='.$verifiedPath.';verifiedType='._get($info,'type').';verifiedName='._get($info,'name').';local='.$localFile.';localSize='.$localSize.';remoteSize='.$remoteSize.';outputLen='.strlen($output).';output='.substr($output,0,200).';lastError='.json_encode(IO::getLastError()));
+		return $ok ? $verifiedPath : false;
 	}
 	private function nextcloudAvatar(){
 		$png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/l4WqKgAAAABJRU5ErkJggg==');
@@ -848,12 +1222,29 @@ class webdavNextcloudPlugin extends PluginBase{
 		$GLOBALS['KOD_NEXTCLOUD_PUT_SHUTDOWN_REGISTERED'] = true;
 		register_shutdown_function(array('webdavNextcloudPlugin','nextcloudPutShutdownFallback'));
 	}
+	public static function nextcloudStaticSafeInfoFull($path){
+		if(!$path) return false;
+		$oldOutException = array_key_exists('SHOW_OUT_EXCEPTION',$GLOBALS) ? $GLOBALS['SHOW_OUT_EXCEPTION'] : null;
+		$GLOBALS['SHOW_OUT_EXCEPTION'] = true;
+		try{
+			$info = IO::infoFull($path);
+			return is_array($info) ? $info : false;
+		}catch(Throwable $e){
+			return false;
+		}finally{
+			if($oldOutException === null){
+				unset($GLOBALS['SHOW_OUT_EXCEPTION']);
+			}else{
+				$GLOBALS['SHOW_OUT_EXCEPTION'] = $oldOutException;
+			}
+		}
+	}
 	public static function nextcloudPutShutdownFallback(){
 		$ctx = isset($GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK']) ? $GLOBALS['KOD_NEXTCLOUD_PUT_FALLBACK'] : false;
 		if(!$ctx || empty($ctx['active'])) return;
 		$targetPath = isset($ctx['targetPath']) ? $ctx['targetPath'] : '';
 		$size = isset($ctx['size']) ? intval($ctx['size']) : 0;
-		$info = $targetPath ? IO::infoFull($targetPath) : false;
+		$info = $targetPath ? self::nextcloudStaticSafeInfoFull($targetPath) : false;
 		$ok = $info && (!$size || intval(_get($info,'size')) == $size);
 		$error = error_get_last();
 		$sentFile = '';$sentLine = 0;
@@ -906,7 +1297,7 @@ class webdavNextcloudPlugin extends PluginBase{
 	private function nextcloudBumpEtag($path){
 		try{
 			if(!$path) return false;
-			$info = IO::infoFull($path);
+			$info = $this->nextcloudSafeInfoFull($path);
 			if(!$info || !$info['sourceID']) return false;
 			$value = time().'.'.rand_string(8);
 			Model("Source")->metaSet($info['sourceID'],'webdavEtag',$value);
@@ -978,7 +1369,7 @@ class webdavNextcloudPlugin extends PluginBase{
 	}
 	private function nextcloudUploadedEtag($path,$info=false){
 		if(!$info || !is_array($info) || !isset($info['metaInfo'])){
-			$info = IO::infoFull($path);
+			$info = $this->nextcloudSafeInfoFull($path);
 		}
 		if(!$info || !is_array($info)) return md5(time().$path);
 		$hash = $this->nextcloudUploadedHash($info);
@@ -1204,8 +1595,8 @@ class webdavNextcloudPlugin extends PluginBase{
 			'installed' => true,
 			'maintenance' => false,
 			'needsDbUpgrade' => false,
-			'version' => '31.0.0.0',
-			'versionstring' => '31.0.0',
+			'version' => '33.0.0.0',
+			'versionstring' => '33.0.0',
 			'edition' => 'kodbox',
 			'productname' => 'Kodbox',
 		));return true;
@@ -1226,9 +1617,13 @@ class webdavNextcloudPlugin extends PluginBase{
 			),
 		));return true;
 	}
+	private function currentUserName(){
+		$user = Session::get("kodUser");
+		return is_array($user) ? (_get($user,'name') ? _get($user,'name') : _get($user,'userID')) : '';
+	}
 	private function nextcloudCapabilities(){
 		$data = array(
-			'version' => array('major'=>31,'minor'=>0,'micro'=>0,'string'=>'31.0.0','edition'=>'kodbox'),
+			'version' => array('major'=>33,'minor'=>0,'micro'=>0,'string'=>'33.0.0','edition'=>'kodbox'),
 			'capabilities' => array(
 				'core' => array(
 					'webdav-root' => 'remote.php/dav',
@@ -1258,7 +1653,12 @@ class webdavNextcloudPlugin extends PluginBase{
 						'filters' => array('all','files'),
 					),
 				),
-				'files_sharing' => array('api_enabled' => false),
+				'files_sharing' => array(
+					'api_enabled' => true,
+					'public' => array('enabled' => true,'password' => array('enforced' => false)),
+					'user' => array('send_mail' => false),
+					'group_sharing' => true,
+				),
 			),
 		);
 		$this->nextcloudOcsResponse($data);return true;
@@ -1275,18 +1675,352 @@ class webdavNextcloudPlugin extends PluginBase{
 		$this->nextcloudAuthUser();
 		$this->nextcloudOcsResponse(array());return true;
 	}
+	private function nextcloudNavigationApps(){
+		$this->nextcloudOcsResponse(array('apps'=>array(array(
+			'id' => 'files',
+			'name' => '个人文件',
+			'href' => $this->nextcloudBaseUrl().'#explorer&path='.rawurlencode(MY_HOME),
+			'icon' => $this->nextcloudBaseUrl().'/favicon.ico',
+			'type' => 'filesystem',
+			'active' => true,
+		))));return true;
+	}
+	private function nextcloudSharingApi($uri){
+		$user = $this->nextcloudAuthUser();
+		if(!$user) return true;
+		if(preg_match('#/(sharees|sharees_recommended)(?:/.*)?$#',$uri)){
+			return $this->nextcloudShareesSearch();
+		}
+		if(preg_match('#/(deletedshares|remote_shares)(?:/.*)?$#',$uri)){
+			$this->nextcloudOcsResponse(array());return true;
+		}
+		if($_SERVER['REQUEST_METHOD'] == 'POST' && preg_match('#/shares/?$#',$uri)){
+			return $this->nextcloudShareCreate($user);
+		}
+		if($_SERVER['REQUEST_METHOD'] == 'GET' && preg_match('#/shares/?$#',$uri)){
+			return $this->nextcloudShareList($user);
+		}
+		if(preg_match('#/shares/([0-9]+)$#',$uri,$match)){
+			if($_SERVER['REQUEST_METHOD'] == 'DELETE') return $this->nextcloudShareDelete($match[1]);
+			if($_SERVER['REQUEST_METHOD'] == 'PUT') return $this->nextcloudShareUpdate($match[1]);
+			if($_SERVER['REQUEST_METHOD'] == 'GET') return $this->nextcloudShareGet($match[1]);
+		}
+		return $this->nextcloudOcsError(404,'Sharing endpoint is not implemented.');
+	}
+	private function nextcloudShareCreate($user){
+		$req = $this->nextcloudRequestData();
+		$path = _get($req,'path','');
+		$source = $this->nextcloudDavPathSourceInfo($path);
+		if(!$source) return $this->nextcloudOcsError(404,'File not found.');
+		$shareType = intval(_get($req,'shareType',3));
+		$data = array(
+			'title' => _get($source,'name'),
+			'password' => _get($req,'password',''),
+			'timeTo' => 0,
+			'options' => array(),
+			'authTo' => array(),
+			'sourcePath' => KodIO::make($source['sourceID']),
+			'isLink' => $shareType == 3 ? 1 : 0,
+			'isShareTo' => $shareType == 3 ? 0 : 1,
+		);
+		if($shareType == 3){
+			if(!Action('user.authRole')->authCan('explorer.shareLink')) return $this->nextcloudOcsError(403,'No permission to create public link.');
+			if(_get($req,'hideDownload') || _get($req,'attributes') == 'notDownload') $data['options']['notDownload'] = 1;
+		}else{
+			if(!Action('user.authRole')->authCan('explorer.share')) return $this->nextcloudOcsError(403,'No permission to share.');
+			$target = $this->nextcloudShareTarget($shareType,_get($req,'shareWith',''),_get($req,'permissions',1));
+			if(!$target) return $this->nextcloudOcsError(404,'Share target not found.');
+			$data['authTo'] = array($target);
+		}
+		$shareID = Model('Share')->shareAdd($source['sourceID'],$data);
+		if(!$shareID) return $this->nextcloudOcsError(500,'Create share failed.');
+		$shareInfo = Model('Share')->getInfo($shareID);
+		if($shareType == 3) $shareInfo = Action('explorer.shareOut')->sendShareSiteAppend($shareInfo);
+		$this->nextcloudOcsResponse($this->nextcloudShareFormat($shareInfo,$shareType));return true;
+	}
+	private function nextcloudShareesSearch(){
+		$req = $this->nextcloudRequestData();
+		$search = trim(_get($req,'search',''));
+		$result = array(
+			'exact' => array('users'=>array(),'groups'=>array(),'remotes'=>array(),'emails'=>array(),'circles'=>array(),'rooms'=>array()),
+			'users' => array(),
+			'groups' => array(),
+			'remotes' => array(),
+			'emails' => array(),
+			'lookup' => array(),
+			'circles' => array(),
+			'rooms' => array(),
+		);
+		if($search !== ''){
+			$users = Model('User')->where(array(
+				'status' => 1,
+				'name' => array('like','%'.$search.'%'),
+			))->limit(20)->select();
+			$usersNick = Model('User')->where(array(
+				'status' => 1,
+				'nickName' => array('like','%'.$search.'%'),
+			))->limit(20)->select();
+			$seen = array();
+			foreach(array_merge(is_array($users) ? $users : array(),is_array($usersNick) ? $usersNick : array()) as $item){
+				if(!_get($item,'userID') || isset($seen[$item['userID']])) continue;
+				$seen[$item['userID']] = true;
+				$name = _get($item,'name');
+				$display = _get($item,'nickName') ? _get($item,'nickName') : $name;
+				$result['users'][] = array(
+					'label' => $display,
+					'value' => array('shareType'=>0,'shareWith'=>$name,'shareWithDisplayName'=>$display),
+				);
+			}
+			$groups = Model('Group')->where(array('name'=>array('like','%'.$search.'%')))->limit(20)->select();
+			if(is_array($groups)){
+				foreach($groups as $item){
+					$name = _get($item,'name');
+					if(!$name) continue;
+					$result['groups'][] = array(
+						'label' => $name,
+						'value' => array('shareType'=>1,'shareWith'=>$name,'shareWithDisplayName'=>$name),
+					);
+				}
+			}
+		}
+		$this->nextcloudOcsResponse($result);return true;
+	}
+	private function nextcloudShareList($user){
+		$req = $this->nextcloudRequestData();
+		$path = _get($req,'path','');
+		$where = array('userID'=>KodUser::id());
+		if($path){
+			$source = $this->nextcloudDavPathSourceInfo($path);
+			if(!$source){
+				$this->nextcloudOcsResponse(array());return true;
+			}
+			$where['sourceID'] = $source['sourceID'];
+		}
+		$list = Model('Share')->where($where)->select();
+		$result = array();
+		if(is_array($list)){
+			foreach($list as $item){
+				$info = Model('Share')->getInfo($item['shareID']);
+				if($info) $result[] = $this->nextcloudShareFormat($info,$this->nextcloudShareTypeFromInfo($info));
+			}
+		}
+		$this->nextcloudOcsResponse($result);return true;
+	}
+	private function nextcloudShareGet($shareID){
+		$info = Model('Share')->getInfo($shareID);
+		if(!$info || _get($info,'userID') != KodUser::id()) return $this->nextcloudOcsError(404,'Share not found.');
+		$this->nextcloudOcsResponse($this->nextcloudShareFormat($info,$this->nextcloudShareTypeFromInfo($info)));return true;
+	}
+	private function nextcloudShareUpdate($shareID){
+		$req = $this->nextcloudRequestData();
+		$info = Model('Share')->getInfo($shareID);
+		if(!$info || _get($info,'userID') != KodUser::id()) return $this->nextcloudOcsError(404,'Share not found.');
+		$data = array();
+		if(isset($req['password'])) $data['password'] = _get($req,'password','');
+		if(isset($req['expireDate'])) $data['timeTo'] = strtotime($req['expireDate'].' 23:59:59');
+		if(isset($req['permissions']) && _get($info,'isShareTo') == '1'){
+			$authTo = _get($info,'authList',array());
+			if(is_array($authTo)){
+				foreach($authTo as &$item){$item['authID'] = $this->nextcloudShareAuthID($req['permissions']);}
+				$data['authTo'] = $authTo;
+			}
+		}
+		if(!$data){$this->nextcloudOcsResponse($this->nextcloudShareFormat($info,$this->nextcloudShareTypeFromInfo($info)));return true;}
+		Model('Share')->shareEdit($shareID,$data);
+		return $this->nextcloudShareGet($shareID);
+	}
+	private function nextcloudShareDelete($shareID){
+		$info = Model('Share')->getInfo($shareID);
+		if(!$info || _get($info,'userID') != KodUser::id()) return $this->nextcloudOcsError(404,'Share not found.');
+		Model('Share')->remove(array($shareID));
+		$this->nextcloudOcsResponse(array());return true;
+	}
+	private function nextcloudDavPathSourceInfo($path){
+		$path = rawurldecode($path);
+		if(!$path) return false;
+		if($path[0] != '/') $path = '/'.$path;
+		require_once($this->pluginPath.'php/webdavServer.class.php');
+		require_once($this->pluginPath.'php/webdavServerKod.class.php');
+		if(!defined('KOD_NEXTCLOUD_COMPAT')) define('KOD_NEXTCLOUD_COMPAT',1);
+		$dav = new webdavServerKod('/remote.php/dav/files/'.rawurlencode(_get(Session::get('kodUser'),'name','')).'/');
+		$kodPath = $dav->parsePath($path);
+		if(!$kodPath && $this->nextcloudIsMobileClient()) $kodPath = rtrim(MY_HOME,'/').'/'.trim($path,'/');
+		$info = $kodPath ? $this->nextcloudSafeInfoFull($kodPath) : false;
+		return is_array($info) && _get($info,'sourceID') ? $info : false;
+	}
+	private function nextcloudShareTarget($shareType,$shareWith,$permissions){
+		$shareWith = trim($shareWith);
+		if($shareWith === '') return false;
+		$targetType = $shareType == 1 ? 2 : 1;
+		if($targetType == 1){
+			$user = Model('User')->where(array('name'=>$shareWith))->find();
+			if(!$user) $user = Model('User')->where(array('nickName'=>$shareWith))->find();
+			if(!$user || !_get($user,'userID')) return false;
+			$targetID = $user['userID'];
+		}else{
+			$group = Model('Group')->where(array('name'=>$shareWith))->find();
+			if(!$group || !_get($group,'groupID')) return false;
+			$targetID = $group['groupID'];
+		}
+		return array('targetType'=>$targetType,'targetID'=>$targetID,'authID'=>$this->nextcloudShareAuthID($permissions));
+	}
+	private function nextcloudShareAuthID($permissions){
+		return intval($permissions) <= 1 ? '1' : '5';
+	}
+	private function nextcloudShareTypeFromInfo($shareInfo){
+		if(intval(_get($shareInfo,'isLink'))) return 3;
+		$authList = _get($shareInfo,'authList',array());
+		if(is_array($authList) && count($authList) > 0 && _get($authList[0],'targetType') == '2') return 1;
+		return 0;
+	}
+	private function nextcloudShareFormat($shareInfo,$shareType=3){
+		$source = _get($shareInfo,'sourceInfo',array());
+		$sourceID = intval(_get($shareInfo,'sourceID',_get($source,'sourceID')));
+		$path = $sourceID ? KodIO::make($sourceID) : '';
+		$url = '';
+		if($shareType == 3){
+			if(_get($shareInfo,'shareHash')) $url = urlApi('sitemap/share/'._get($shareInfo,'shareHash'),null);
+		}
+		$authList = _get($shareInfo,'authList',array());
+		$shareWith = '';
+		$shareWithDisplay = '';
+		if(is_array($authList) && count($authList) > 0){
+			$target = $authList[0];
+			if(_get($target,'targetType') == '2'){
+				$group = Model('Group')->getInfo(_get($target,'targetID'));
+				$shareWith = _get($group,'name','');
+				$shareWithDisplay = $shareWith;
+			}else{
+				$user = Model('User')->getInfo(_get($target,'targetID'));
+				$shareWith = _get($user,'name','');
+				$shareWithDisplay = _get($user,'nickName') ? _get($user,'nickName') : $shareWith;
+			}
+		}
+		$owner = $this->currentUserName();
+		$pathDisplay = '/'.trim(_get($source,'pathDisplay',_get($source,'name','')),'/');
+		return array(
+			'id' => ''.intval(_get($shareInfo,'shareID')),
+			'share_type' => $shareType,
+			'uid_owner' => $owner,
+			'displayname_owner' => $owner,
+			'uid_file_owner' => $owner,
+			'displayname_file_owner' => $owner,
+			'permissions' => 31,
+			'stime' => intval(_get($shareInfo,'createTime',time())),
+			'expiration' => intval(_get($shareInfo,'timeTo')) ? date('Y-m-d',intval(_get($shareInfo,'timeTo'))) : null,
+			'token' => _get($shareInfo,'shareHash',''),
+			'url' => $url,
+			'path' => $pathDisplay,
+			'item_type' => _get($source,'type') == 'folder' ? 'folder' : 'file',
+			'mimetype' => _get($source,'type') == 'folder' ? 'httpd/unix-directory' : get_file_mime(_get($source,'ext')),
+			'storage_id' => 'kodbox::'.$sourceID,
+			'storage' => 1,
+			'item_source' => ''.$sourceID,
+			'file_source' => ''.$sourceID,
+			'file_parent' => ''.intval(_get($source,'parentID')),
+			'file_target' => '/'.trim(_get($source,'name',''),'/'),
+			'share_with' => $shareWith,
+			'share_with_displayname' => $shareWithDisplay,
+			'mail_send' => 0,
+			'note' => '',
+			'hide_download' => intval(_get($shareInfo,'options.notDownload')) ? 1 : 0,
+			'label' => '',
+		);
+	}
+	private function nextcloudRequestData(){
+		$data = $_REQUEST;
+		$raw = file_get_contents('php://input');
+		if($raw){
+			$json = json_decode($raw,true);
+			if(is_array($json)) $data = array_merge($data,$json);
+		}
+		return $data;
+	}
 	private function nextcloudOpenInBrowser($fileID){
 		$source = Model('Source')->where(array('sourceID'=>intval($fileID),'isDelete'=>0))->find();
 		if(!is_array($source) || !isset($source['sourceID'])){
 			return $this->nextcloudRedirect($this->nextcloudBaseUrl(),302);
 		}
 		$path = KodIO::make($source['sourceID']);
-		$route = intval(_get($source,'isFolder')) ? 'explorer' : 'fileView';
-		return $this->nextcloudRedirect($this->nextcloudBaseUrl().'#'.$route.'&path='.rawurlencode($path),302);
+		$url = intval(_get($source,'isFolder')) ?
+			$this->nextcloudBaseUrl().'#explorer&path='.rawurlencode($path) :
+			$this->nextcloudBaseUrl().'#explorer&sidf='.intval($source['sourceID']);
+		return $this->nextcloudRedirect($url,302);
 	}
 	private function nextcloudActivityApi(){
 		if(!$this->nextcloudAuthUser()) return true;
-		$this->nextcloudOcsResponse(array());return true;
+		$source = $this->nextcloudActivitySource();
+		if(!$source){
+			$this->nextcloudOcsResponse(array());return true;
+		}
+		$data = Model('SourceEvent')->listBySource($source['sourceID']);
+		$list = _get($data,'list',array());
+		if(!is_array($list)) $list = array();
+		$page = max(1,intval(_get($_REQUEST,'page',1)));
+		$pageNum = max(1,min(200,intval(_get($_REQUEST,'pageNum',_get($_REQUEST,'limit',200)))));
+		$list = array_slice($list,($page - 1) * $pageNum,$pageNum);
+		$result = array();
+		foreach($list as $index => $item){
+			$result[] = $this->nextcloudActivityItem($item,$source,$index);
+		}
+		$this->nextcloudOcsResponse($result);return true;
+	}
+	private function nextcloudActivitySource(){
+		$fileID = intval(_get($_REQUEST,'fileId',_get($_REQUEST,'fileid',0)));
+		if(!$fileID && is_numeric(_get($_REQUEST,'object_id',''))) $fileID = intval($_REQUEST['object_id']);
+		if($fileID > 0){
+			$source = Model('Source')->where(array('sourceID'=>$fileID,'isDelete'=>0))->find();
+			if(is_array($source) && _get($source,'sourceID')) return $source;
+		}
+		$path = _get($_REQUEST,'path','');
+		if(!$path && _get($_REQUEST,'object_id','') && !is_numeric($_REQUEST['object_id'])){
+			$path = $_REQUEST['object_id'];
+		}
+		if($path){
+			$source = $this->nextcloudDavPathSourceInfo($path);
+			if($source) return $source;
+		}
+		return IO::infoFull(MY_HOME);
+	}
+	private function nextcloudActivityItem($item,$source,$index){
+		$sourceInfo = _get($item,'sourceInfo',array());
+		$eventSourceID = intval(_get($sourceInfo,'sourceID',_get($item,'sourceID',_get($source,'sourceID'))));
+		$name = _get($sourceInfo,'name',_get($source,'name',''));
+		$type = _get($sourceInfo,'type',_get($source,'type','file')) == 'folder' ? 'folder' : 'file';
+		$time = intval(_get($item,'createTime',_get($item,'modifyTime',time())));
+		$user = _get($item,'user',_get($item,'userInfo',array()));
+		$userName = is_array($user) ? (_get($user,'name',_get($user,'nickName',$this->currentUserName()))) : ($user ? $user : $this->currentUserName());
+		$subject = $this->nextcloudActivitySubject($item,$name);
+		$link = $eventSourceID ? $this->nextcloudBaseUrl().'#explorer&sidf='.$eventSourceID : $this->nextcloudBaseUrl();
+		return array(
+			'activity_id' => intval(_get($item,'id',_get($item,'eventID',$time.$index))),
+			'app' => 'files',
+			'type' => 'file_changed',
+			'user' => $userName,
+			'affecteduser' => $this->currentUserName(),
+			'subject' => $subject,
+			'subject_rich' => array($subject,array()),
+			'message' => '',
+			'message_rich' => array('',array()),
+			'object_type' => 'files',
+			'object_id' => $eventSourceID,
+			'object_name' => $name,
+			'datetime' => date('c',$time),
+			'link' => $link,
+			'icon' => $this->nextcloudBaseUrl().'/favicon.ico',
+			'file' => array('id'=>$eventSourceID,'name'=>$name,'path'=>_get($sourceInfo,'pathDisplay',''),'type'=>$type),
+		);
+	}
+	private function nextcloudActivitySubject($item,$name){
+		$desc = _get($item,'desc','');
+		if(is_array($desc)){
+			$text = _get($desc,'text','');
+			if(!$text && _get($desc,'from') && _get($desc,'to')) $text = '重命名 '.$name;
+			if($text) return $text;
+		}
+		$action = _get($item,'type',_get($item,'action',''));
+		if($action) return $action.($name ? ': '.$name : '');
+		return $name ? '更新了 '.$name : '文件有更新';
 	}
 	private function nextcloudActivityPage(){
 		header('Content-Type: text/html; charset=utf-8');
@@ -1433,7 +2167,7 @@ class webdavNextcloudPlugin extends PluginBase{
 	
 	public function log($data){
 		static $logIndex = 0;
-		if(_get($this->getConfig(),'echoLog') != '1') return;
+		if(!$this->nextcloudLogEnabled()) return;
 		if(is_array($data)){$data = json_encode_force($data);}
 		if($_SERVER['REQUEST_METHOD'] == 'PROPFIND' ) return;
 		
@@ -1447,11 +2181,15 @@ class webdavNextcloudPlugin extends PluginBase{
 	}
 	public function clientLog($data){
 		static $logIndex = 0;
-		if(_get($this->getConfig(),'echoLog') != '1') return;
+		if(!$this->nextcloudLogEnabled()) return;
 		if(is_array($data)){$data = json_encode_force($data);}
 
 		$prefix = "     [C-$logIndex] ";
 		if(!$logIndex){$prefix = "[CLIENT-$logIndex] ";$logIndex++;}
 		write_log($prefix.$data,'webdavNextcloud');
+	}
+	private function nextcloudLogEnabled(){
+		$config = $this->getConfig();
+		return _get($config,'nextcloudCompatLog') == '1' || _get($config,'echoLog') == '1';
 	}
 }

@@ -140,6 +140,8 @@ class webdavServer {
 		$fileID = $this->itemFileID($itemFile);
 		$permissions = $this->itemPermissions($itemFile);
 		$checksums = $this->itemChecksums($itemFile);
+		$favorite = $this->itemFavorite($itemFile);
+		$privateLink = $this->itemPrivateLink($itemFile);
 		$hasPreview = $itemFile['type'] == 'file' ? 'false':'false';
 		$lockDiscovery = $this->itemLockDiscovery($itemFile);
 		if ($itemFile['type'] == 'folder') {//getetag
@@ -190,7 +192,8 @@ class webdavServer {
 					<oc:checksums>{$checksums}</oc:checksums>
 					<oc:owner-id>{$this->currentUserName()}</oc:owner-id>
 					<oc:owner-display-name>{$this->currentUserName()}</oc:owner-display-name>
-					<oc:favorite>0</oc:favorite>
+					<oc:favorite>{$favorite}</oc:favorite>
+					<oc:privatelink>{$privateLink}</oc:privatelink>
 					<nc:has-preview>{$hasPreview}</nc:has-preview>
 					<D:quota-used-bytes>{$item['size']}</D:quota-used-bytes>
 					<D:quota-available-bytes>-3</D:quota-available-bytes>
@@ -257,6 +260,20 @@ class webdavServer {
 	protected function itemPermissions($item){
 		if($item['type'] == 'folder') return 'RGDNVCK';
 		return 'RGDNVW';
+	}
+	protected function itemFavorite($item){
+		return '0';
+	}
+	protected function itemPrivateLink($item){
+		$id = isset($item['sourceID']) ? intval($item['sourceID']) : 0;
+		if(!$id) return '';
+		$base = rtrim(APP_HOST,'/');
+		if($item['type'] == 'folder'){
+			$url = $base.'#explorer&path='.rawurlencode(KodIO::make($id));
+		}else{
+			$url = $base.'#explorer&sidf='.$id;
+		}
+		return htmlentities($url);
 	}
 	protected function itemChecksums($item){
 		$sha1 = _get($item,'fileInfo.hashSha1');
@@ -402,6 +419,9 @@ class webdavServer {
 		
 	public function httpHEAD() {
 		$info = $this->pathInfo($this->path);
+		if(!$info && defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT){
+			return array('code'=>404,'headers'=>array('Content-Length: 0'));
+		}
 		$etag = ($info && is_array($info)) ? $this->itemEtag($info) : md5(time());
         if(!$info || $info['type'] == 'folder'){
         	return array(
@@ -681,7 +701,9 @@ class webdavServer {
     */
     public function response($data) {
 		$this->responseCleanAfterAction('response');
-        $headers   = is_array($data['headers']) ? $data['headers'] :array();
+		if(!isset($data['headers']) || !is_array($data['headers'])) $data['headers'] = array();
+		if(!isset($data['body'])) $data['body'] = '';
+        $headers   = $data['headers'];
 		$headers[] = HttpHeader::code($data['code']);
 		$headers[] = 'Pragma: no-cache';
 		$headers[] = 'Cache-Control: no-cache';

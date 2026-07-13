@@ -69,6 +69,10 @@ class webdavServerKod extends webdavServer {
 		
 		$this->checkErrorHead();
 		$this->lastError = is_string($json['data']) ?$json['data']:'';
+		if((defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT) &&
+			(HttpHeader::method() == 'PUT' || !empty($GLOBALS['KOD_NEXTCLOUD_UPLOAD_CAPTURE']))){
+			return $json;
+		}
 		$this->response(array('code'=>404));exit;
 	}
 	public function getLastError(){
@@ -125,11 +129,21 @@ class webdavServerKod extends webdavServer {
 	}
 	public function parsePath($path){
 		if(defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT){
+			if(defined('KOD_NEXTCLOUD_MOBILE_PERSONAL_ROOT') && KOD_NEXTCLOUD_MOBILE_PERSONAL_ROOT){
+				if(!$path || $path == '/') return MY_HOME;
+				$pathArr = explode('/',KodIO::clear(trim($path,'/')));
+				$rootList = Action('explorer.list')->path(MY_HOME);
+				return $this->pathInfoDeep($rootList,$pathArr);
+			}
 			$this->nextcloudCompatRoot = (!$path || $path == '/');
 			if($this->nextcloudCompatRoot) return MY_HOME;
 			$pathArr = explode('/',KodIO::clear(trim($path,'/')));
 			$rootList = $this->nextcloudCompatRootList();
-			return $this->pathInfoDeep($rootList,$pathArr);
+			$result = $this->pathInfoDeep($rootList,$pathArr);
+			if(!$result && $this->nextcloudMobilePersonalPathFallback($path,$rootList)){
+				$result = rtrim(MY_HOME,'/').'/'.KodIO::clear(trim($path,'/'));
+			}
+			return $result;
 		}
 		$options   = $this->plugin->getConfig();
 		$rootBlock = '{block:files}/';
@@ -201,6 +215,8 @@ class webdavServerKod extends webdavServer {
 			$current = $listAction->pathCurrent($path);
 			if(is_array($current)) $info = array_merge($info,$current);
 		}
+		$infoFull = IO::infoFull($path);
+		if(is_array($infoFull)) $info = array_merge($info,$infoFull);
 		return $this->nextcloudCompatVirtualItem($path,$name,$info);
 	}
 	private function nextcloudCompatVirtualItem($path,$name,$info=array()){
@@ -223,7 +239,7 @@ class webdavServerKod extends webdavServer {
 		$info['path'] = $path;
 		$info['name'] = $name;
 		$info['type'] = 'folder';
-		$info['size'] = 0;
+		$info['size'] = isset($info['size']) ? intval($info['size']) : 0;
 		return $info;
 	}
 	private function nextcloudCompatVirtualID($seed){
@@ -290,7 +306,32 @@ class webdavServerKod extends webdavServer {
 		if($path === false) return true;
 		$items = explode('/',trim($path,'/'));
 		if(!trim($path,'/')) return true;
+		if(count($items) <= 1 && $this->nextcloudMobileRootWriteAllowed($path)) return false;
 		return count($items) <= 1;
+	}
+	private function nextcloudMobileRootWriteAllowed($path){
+		$name = trim($path,'/');
+		if(!$name || strpos($name,'/') !== false) return false;
+		return $this->nextcloudMobileWriteAllowed();
+	}
+	private function nextcloudMobileWriteAllowed(){
+		$method = HttpHeader::method();
+		if($method != 'PUT' && $method != 'MKCOL') return false;
+		$ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+		return !!preg_match('/(android|ios|iphone|ipad|mobile|nextcloud-android|nextcloud-ios|nextcloudphotos)/i',$ua);
+	}
+	private function nextcloudMobilePersonalPathFallback($path,$rootList=false){
+		if(!defined('KOD_NEXTCLOUD_COMPAT') || !KOD_NEXTCLOUD_COMPAT) return false;
+		if(!$path || $path == '/') return false;
+		$first = explode('/',KodIO::clear(trim($path,'/')))[0];
+		if($first && is_array($rootList)){
+			$list = $this->pathListMerge($rootList);
+			foreach($list as $item){
+				if(_get($item,'name') == $first) return false;
+			}
+		}
+		$ua = isset($_SERVER['HTTP_USER_AGENT']) ? $_SERVER['HTTP_USER_AGENT'] : '';
+		return !!preg_match('/(android|ios|iphone|ipad|mobile|nextcloud-android|nextcloud-ios|nextcloudphotos)/i',$ua);
 	}
 	private function nextcloudCompatRootWriteError(){
 		return array(
@@ -383,6 +424,11 @@ class webdavServerKod extends webdavServer {
 	}
 	
 	public function pathInfo($path){
+		if(defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT){
+			$info = IO::infoFull($path);
+			if(is_array($info)) return $info;
+			return false;
+		}
 		return IO::info($path);
 	}
 	protected function pathEtag($path){
@@ -484,6 +530,56 @@ class webdavServerKod extends webdavServer {
 		}
 		return $perm;
 	}
+	protected function itemFavorite($item){
+		if(!defined('KOD_NEXTCLOUD_COMPAT') || !KOD_NEXTCLOUD_COMPAT) return parent::itemFavorite($item);
+		$path = _get($item,'path');
+		$sourceID = intval(_get($item,'sourceID'));
+		if(!$path && !$sourceID) return '0';
+		$list = Model('UserFav')->listData();
+		if(!is_array($list)) return '0';
+		foreach($list as $fav){
+			$favPath = _get($fav,'path');
+			if($sourceID && intval($favPath) == $sourceID) return '1';
+			if($path && $favPath == $path) return '1';
+		}
+		return '0';
+	}
+	private function nextcloudFavoriteSet($favorite){
+		$info = IO::infoFull($this->path);
+		if(!$info || !is_array($info)) $info = IO::info($this->path);
+		if(!$info || !_get($info,'name')) return false;
+		$name = _get($info,'name');
+		if($favorite){
+			$path = _get($info,'path',$this->path);
+			$type = _get($info,'type') == 'folder' ? 'folder' : 'file';
+			$pathInfo = KodIO::parse($path);
+			if(_get($pathInfo,'type') == KodIO::KOD_SOURCE){
+				$path = _get($pathInfo,'id');
+				$type = 'source';
+				Action('explorer.listSafe')->authCheckAllow($path);
+			}
+			$res = Model('UserFav')->addFav($path,$name,$type);
+			return !!$res || $this->itemFavorite($info) == '1';
+		}
+		$res = Model('UserFav')->removeByName($name);
+		return !!$res || $this->itemFavorite($info) == '0';
+	}
+	private function nextcloudFavoritePropPatchResponse($ok){
+		$status = $ok ? 'HTTP/1.1 200 OK' : 'HTTP/1.1 409 Conflict';
+		$href = htmlentities($_SERVER['REQUEST_URI']);
+		$out = '
+		<D:response>
+			<D:href>'.$href.'</D:href>
+			<D:propstat>
+				<D:prop><oc:favorite xmlns:oc="http://owncloud.org/ns" /></D:prop>
+				<D:status>'.$status.'</D:status>
+			</D:propstat>
+		</D:response>';
+		return array(
+			"code" => $ok ? 207 : 409,
+			"body" => "<D:multistatus xmlns:D=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">\n{$out}\n</D:multistatus>",
+		);
+	}
 	protected function itemLockDiscovery($item){
 		$userID = _get($item,'metaInfo.systemLock');
 		if(!$userID) return '<D:lockdiscovery/>';
@@ -555,6 +651,16 @@ class webdavServerKod extends webdavServer {
 		if($this->nextcloudCompatRootWriteBlocked()) return $this->nextcloudCompatRootWriteError();
 		return parent::httpMKCOL();
 	}
+	public function httpPROPPATCH(){
+		if(defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT){
+			$body = file_get_contents('php://input');
+			if(preg_match('#<[^>]*:?favorite[^>]*>\s*([01])\s*</[^>]*:?favorite>#i',$body,$match)){
+				$ok = $this->nextcloudFavoriteSet($match[1] == '1');
+				return $this->nextcloudFavoritePropPatchResponse($ok);
+			}
+		}
+		return parent::httpPROPPATCH();
+	}
 	public function httpMOVE() {
 		if($this->nextcloudCompatRootWriteBlocked() || $this->nextcloudCompatRootWriteBlocked(true)){
 			return $this->nextcloudCompatRootWriteError();
@@ -610,6 +716,15 @@ class webdavServerKod extends webdavServer {
 		$inPath  = $this->pathGet();
 		if(IO::pathFather($inPath) == '.recycle') return false;
 		$pathFather = rtrim($this->parsePath(IO::pathFather($inPath)),'/');
+		if(defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT && $this->nextcloudMobileWriteAllowed()){
+			if($pathFather && strpos(rtrim($pathFather,'/').'/', rtrim(MY_HOME,'/').'/') === 0 && !IO::exist($pathFather)){
+				IO::mkdir($pathFather);
+			}
+		}
+		if(!$pathFather && defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT && $this->nextcloudMobileWriteAllowed()){
+			$pathFather = rtrim(MY_HOME.'/'.trim(IO::pathFather($inPath),'/'),'/');
+			if($pathFather) IO::mkdir($pathFather);
+		}
 		return $pathFather.'/'.IO::pathThis($inPath);
 	}
 	
@@ -854,6 +969,15 @@ class webdavServerKod extends webdavServer {
 		$path 	= $this->parsePath($pathUrl);
 		$dest   = $this->parsePath(IO::pathFather($destURL)); //多出一层-来源文件(夹)名
 		$this->plugin->log("from=$path;to=$dest;$pathUrl;$destURL");
+		if(defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT){
+			$sourceInfo = IO::infoFull($path);
+			$destInfo = IO::infoFull($this->parsePath($destURL));
+			if(is_array($sourceInfo) && is_array($destInfo) &&
+				_get($sourceInfo,'sourceID') && _get($sourceInfo,'sourceID') == _get($destInfo,'sourceID')){
+				$this->plugin->log("move same source noop; sourceID="._get($sourceInfo,'sourceID').";$pathUrl;$destURL");
+				return $path;
+			}
+		}
 
 		// 目录不变,重命名,(编辑文件)
 		$io = IO::init('/');
@@ -861,6 +985,15 @@ class webdavServerKod extends webdavServer {
 			if(!$this->can($path,'edit')) return false;
 			$destFile = rtrim($dest,'/').'/'.$io->pathThis($destURL);
 			$this->plugin->log("edit=$destFile;exists=".intval($this->pathExists($destFile)));
+			if(defined('KOD_NEXTCLOUD_COMPAT') && KOD_NEXTCLOUD_COMPAT){
+				$sourceInfo = isset($sourceInfo) ? $sourceInfo : IO::infoFull($path);
+				$destInfo = IO::infoFull($destFile);
+				if(is_array($sourceInfo) && is_array($destInfo) &&
+					_get($sourceInfo,'sourceID') && _get($sourceInfo,'sourceID') == _get($destInfo,'sourceID')){
+					$this->plugin->log("rename same source noop; sourceID="._get($sourceInfo,'sourceID').";$pathUrl;$destURL");
+					return $path;
+				}
+			}
 
 			/**
 			 * office 编辑保存最后落地时处理（导致历史记录丢失）
